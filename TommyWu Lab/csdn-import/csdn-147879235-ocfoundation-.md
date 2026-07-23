@@ -1,5 +1,5 @@
 ---
-title: "OC语言学习——Foundation框架（下）"
+title: "【iOS】OC语言学习——Foundation框架（下）"
 published: 2025-05-13
 description: "四、Objective — C 集合表述 OC集合类可以用于存储数量不等的多个对象，并且可以实现常用的数据结构，例如栈和队列等，除此以外，OC集合还可以用来保存具有映射关系的关联数组。 OC的集合大致上可以分为三种体系： NSArray 代表有序、可重复的集合，很像一个数组 NS"
 tags: ["Objective-C", "Foundation"]

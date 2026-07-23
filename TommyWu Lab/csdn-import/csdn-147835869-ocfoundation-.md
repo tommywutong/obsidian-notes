@@ -1,5 +1,5 @@
 ---
-title: "OC语言学习——Foundation框架（上）"
+title: "【iOS】OC语言学习——Foundation框架（上）"
 published: 2025-05-11
 description: "一、字符串 NSString代表字符序列不可变的字符串，而NSMutable代表字符序列可变的字符串。 1.1 NSString字符串及功能 通过NSString，我们可以： 1、创建字符串。2、读取文件或网络URL来初始化字符串，或者将字符串写入文件或URL。3、获取字符串长度"
 tags: ["Objective-C", "Foundation"]

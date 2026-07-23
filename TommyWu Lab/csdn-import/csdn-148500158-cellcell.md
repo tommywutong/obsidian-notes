@@ -1,5 +1,5 @@
 ---
-title: "Cell的复用与自定义cell"
+title: "【iOS】Cell的复用与自定义cell"
 published: 2025-09-06
 description: "本着what how why的法则，我们首先要了解什么是cell。 一、Cell简介 在 Objective C（OC） 中， cell 通常指的是 UITableViewCell 或 UICollectionViewCell，也就是 表格或网格视图中的“单元格” 。 UITab"
 tags: ["iOS", "UITableView", "Cell"]
