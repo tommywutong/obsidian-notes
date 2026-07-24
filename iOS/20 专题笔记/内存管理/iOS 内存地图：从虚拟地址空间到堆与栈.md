@@ -67,6 +67,8 @@ draft: true
 - **页表（Page Table）**：记录虚拟页到物理页的映射及读、写、执行等权限。代码访问虚拟地址时，CPU 内部的 **MMU（Memory Management Unit）** 会依据页表完成地址转换。
 - **虚拟内存区域（VM Region）**：一段具有相同属性的连续虚拟地址范围。一个进程拥有许多 VM Region，但整个虚拟地址空间并非从头到尾连续有效。
 
+
+
 ### Page Fault 不一定意味着读取闪存
 
 当 CPU 访问某个虚拟地址，而当前页表状态不能直接完成这次访问时，会触发 Page Fault。之后发生什么取决于页面的来源和访问是否合法：
@@ -186,4 +188,5 @@ image list
 - [Size Matters: An Exploration of Virtual Memory on iOS](https://alwaysprocessing.blog/2022/02/20/size-matters)
 - [Mike Ash — Stack and Heap Objects in Objective-C](https://www.mikeash.com/pyblog/friday-qa-2010-01-15-stack-and-heap-objects-in-objective-c.html)
 - [Mike Ash — Intro to the Objective-C Runtime](https://www.mikeash.com/pyblog/friday-qa-2009-03-13-intro-to-the-objective-c-runtime.html)
+- https://juejin.cn/post/6844903902169710600?searchId=202607242005413F8E66D396B122E9CEF3
 - 本地：[[20 专题笔记/编译链接与启动/Mach-O|Mach-O]]
