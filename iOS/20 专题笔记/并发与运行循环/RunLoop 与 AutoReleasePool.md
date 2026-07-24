@@ -1,7 +1,7 @@
 # RunLoop
 Runloop，也叫事件循环，用于处理程序在运行时接收到的各种事件，比如触摸事件，定时器，UI刷新。其保证了程序的持续运行，程序启动时自动开启主线程runloop。同时在有事件需要处理的时候唤醒线程，无事件的时候让线程休眠，节省了CPU资源。
 
-![[Pasted image 20260506180722.png]]
+![[RunLoop-输入源与定时器.png]]
 
 ## RunLoop相关类和构成
 ```
@@ -24,7 +24,7 @@ CFRunLoopObserverRef
 
 5个类的对应关系大概是：
 
-![[Pasted image 20260506183342.png]]
+![[CFRunLoop-对象关系.png]]
 
 1. **CFRunLoopModeRef
 
@@ -97,7 +97,7 @@ kCFRunLoopAllActivities = 0x0FFFFFFFU
 };
 ```
 
-![[Pasted image 20260506202236.png]]
+![[AutoreleasePoolPage-结构图-A.png]]
 
 
 
@@ -130,7 +130,7 @@ kCFRunLoopAllActivities = 0x0FFFFFFFU
 
 
 
-![[Pasted image 20260506105355.png]]
+![[AutoreleasePoolPage-结构图-B.png]]
 
 ## 2026-05-14 23:29 RunLoop事件处理与模式切换机制
 **来源**: 博客　**confidence**: 0.95
