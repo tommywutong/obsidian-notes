@@ -1,19 +1,22 @@
 ---
-title: "【iOS】内存记账：Clean、Dirty、Compressed 与 Memory Footprint"
+title: 【iOS】内存记账：Clean、Dirty、Compressed 与 Memory Footprint
 published: 2026-07-24
-description: "从'地址在哪里'切换到'现在占用多少'：梳理 Clean、Dirty、Compressed 页面状态，Copy-on-Write 如何让页面变脏，以及内存压力下的压缩、警告与 Jetsam。"
-tags: ["iOS", "Operating System", "Virtual Memory", "Memory", "Memory Footprint", "Jetsam"]
-category: "iOS"
-series: "2026 暑假 iOS 底层学习"
-seriesSlug: "ios-internals-2026-summer"
+description: 从'地址在哪里'切换到'现在占用多少'：梳理 Clean、Dirty、Compressed 页面状态，Copy-on-Write 如何让页面变脏，以及内存压力下的压缩、警告与 Jetsam。
+tags:
+  - iOS
+  - Memory
+  - Jetsam
+category: iOS
+series: 2026 暑假 iOS 底层学习
+seriesSlug: ios-internals-2026-summer
 seriesOrder: 2
 draft: true
 ---
-# iOS 内存记账：Clean、Dirty、Compressed 与 Memory Footprint
+# iOS 内存：Clean、Dirty、Compressed 与 Memory Footprint
 
 ## 前言
 
-系列上一篇 [[iOS 内存地图：从虚拟地址空间到堆与栈]] 回答的是"一段地址属于哪里、从哪里来"：五大分区给出用途分类，Mach-O、堆和线程栈解释这些区域怎样形成，VM Region 是内核描述它们的真实方式。
+系列上一篇 [[iOS 内存：从虚拟地址空间到堆与栈]] 回答的是"一段地址属于哪里、从哪里来"：五大分区给出用途分类，Mach-O、堆和线程栈解释这些区域怎样形成，VM Region 是内核描述它们的真实方式。
 
 但"申请了多大的虚拟地址范围"和"App 当前要为多少物理内存负责"是两个问题。这一篇把观察单位从变量和 Region 切换到内存页，继续追问：这些页面能否重新取得、是否已经被写入、系统怎样计算 Memory Footprint，以及内存压力下系统会做什么。
 
@@ -45,7 +48,7 @@ Apple 在 WWDC18《iOS Memory Deep Dive》中以典型的 16 KB 页面说明：�
 
 ![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260724211423574.png)
 
-以上一篇实验代码中的 `RunMemoryExperiment`（见 [[iOS 内存地图：从虚拟地址空间到堆与栈|上一篇]]）为例：`malloc(32 * 1024)` 申请一段空间，与 `memset(heapBuffer, 0x5A, 1)` 真正触碰其中一个字节，并不是同一个动作。分配器可能先为程序准备可用的虚拟地址；当程序首次访问相应页面时，系统才通过按需分页机制建立页面支持。实际变化还会受到页面是否已经存在、写入是否落在同一页以及分配器元数据等因素影响，所以不能机械地推导出"每写一个字节，内存就一定增加 16 KB"。
+以上一篇实验代码中的 `RunMemoryExperiment`（见 [[iOS 内存：从虚拟地址空间到堆与栈|上一篇]]）为例：`malloc(32 * 1024)` 申请一段空间，与 `memset(heapBuffer, 0x5A, 1)` 真正触碰其中一个字节，并不是同一个动作。分配器可能先为程序准备可用的虚拟地址；当程序首次访问相应页面时，系统才通过按需分页机制建立页面支持。实际变化还会受到页面是否已经存在、写入是否落在同一页以及分配器元数据等因素影响，所以不能机械地推导出"每写一个字节，内存就一定增加 16 KB"。
 
 > **TODO（实测待补充）**
 > 在 `RunMemoryExperiment` 的 `malloc(32 * 1024)` 和 `memset(heapBuffer, 0x5A, 1)` 前后，分别用 `vmmap` 或 Xcode Memory Report 记录一次 dirty / compressed 页数变化，替换本段占位内容，验证"只写入 1 个字节是否真的只影响 1 个页面"。
@@ -118,7 +121,7 @@ Memory Warning 和 Jetsam 是**两套独立机制**，不是一条"先警告、�
 3. Copy-on-Write 是页面从"共享、可丢弃"变成"私有、必须记账"的触发点：首次写入才会真正产生 dirty page，仅仅"映射"或"分配"不会。
 4. iOS 不依赖传统磁盘 Swap 为不断增长的匿名 dirty memory 兜底；内存压缩、Memory Warning 与 Jetsam 是三种不同强度的应对手段，其中 Memory Warning 和 Jetsam 是两套独立机制，不存在严格的先后因果关系。
 
-结合上一篇的六条结论，两篇文章合起来回答了同一个问题的两个层面：一段内存"在哪里、从哪里来"，以及它"现在是否真的占用物理内存、系统怎样为它记账"。地址空间部分见系列上一篇 [[iOS 内存地图：从虚拟地址空间到堆与栈]]。
+结合上一篇的六条结论，两篇文章合起来回答了同一个问题的两个层面：一段内存"在哪里、从哪里来"，以及它"现在是否真的占用物理内存、系统怎样为它记账"。地址空间部分见系列上一篇 [[iOS 内存：从虚拟地址空间到堆与栈]]。
 
 ## 参考资料
 
