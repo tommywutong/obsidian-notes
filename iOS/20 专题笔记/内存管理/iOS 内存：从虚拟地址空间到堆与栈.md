@@ -393,6 +393,9 @@ VM Object 通过 **Pager（换页器）​** 来决定一个内存区域对应�
 
 ### 三个物理内存页面列表
 
+Wired memory pages are not immediately moved back to the free list when they become invalid. Instead they are “garbage collected” when the free-page count falls below the threshold that triggers page out events.  
+当有线内存页面变得无效时，它们不会立即回到空闲列表。而是在空闲页面计数低于触发页面换出的阈值时进行“垃圾回收”。
+
 内核在内部维护三个全局链表来追踪所有物理内存页面的状态：
 
 - **Active List（活跃列表）​**：最近被访问过的页面，正在被使用
