@@ -355,7 +355,7 @@ object   ── 指针变量保存的值
 
 因此，面试中回答"对象在哪里"时，至少需要先确认讨论的是普通动态对象、字面量对象，还是 Tagged Pointer；回答"变量在哪里"时，还要区分变量本身和变量保存的值。
 
-## 用 VM Region 回到真实 iOS
+##  VM Region 
 
 一个 VM Region 是指一段连续的内存页（在虚拟地址空间里），这些页拥有相同的属性（如读写权限、是否是 wired，也就是是否能被 page out）。举几个例子：
 
@@ -416,13 +416,13 @@ Wired memory pages are not immediately moved back to the free list when they bec
 
 与换出相对，换入过程由**内存访问故障（memory access fault）​**触发——当代码访问一个虚拟地址，而该地址没有映射到当前的物理内存时，就会产生故障。故障分两种，处理路径截然不同。
 
-### **软故障（Soft Fault）​**
+#### **软故障（Soft Fault）​**
 
 软故障发生的条件是：目标页面的数据**已经在物理内存中**，但尚未被映射到当前进程的地址空间。这种情况常见于多进程共享同一物理页面（如共享库的代码段）的场景——物理页面存在，只是这个进程的页表里还没有对应的映射条目。
 
 处理路径相对轻量：内核只需在进程的页表中**建立虚拟地址到物理地址的映射**，将该页面标记为 active，整个过程无需访问磁盘。如果触发故障的是一次**写操作**，该页面还会被额外标记为 modified（脏页），以便后续在需要释放时将其写回 backing store。
 
-### **硬故障（Hard Fault）​**
+#### **硬故障（Hard Fault）​**
 
 硬故障发生的条件是：目标页面的数据**不在物理内存中**，已经被换出到 backing store，或者需要从磁盘上的文件（如内存映射文件）中加载。这就是通常意义上的 **page fault（缺页中断）​**，代价远高于软故障。
 
@@ -436,31 +436,7 @@ Wired memory pages are not immediately moved back to the free list when they bec
 在 **iOS** 中，被修改过但非活跃的页面**必须留在内存里**，由拥有它的 App 自己负责清理——这就是为什么 iOS 会发送内存警告，要求 App 主动释放。
 
 
-`task_basic_info`、`mach_task_basic_info` 描述的是整个任务（进程）的虚拟内存和驻留内存汇总信息，不是单个 VM Region。它们可以作为进阶补充，用来区分“进程级汇总指标”和“逐个 Region 的地址地图”：
-
-```c
-/* 旧结构的注释已明确建议改用 MACH_TASK_BASIC_INFO */
-struct task_basic_info {
-    integer_t       suspend_count;
-    vm_size_t       virtual_size;
-    vm_size_t       resident_size;
-    time_value_t    user_time;
-    time_value_t    system_time;
-    policy_t        policy;
-};
-
-struct mach_task_basic_info {
-    mach_vm_size_t  virtual_size;
-    mach_vm_size_t  resident_size;
-    mach_vm_size_t  resident_size_max;
-    time_value_t    user_time;
-    time_value_t    system_time;
-    policy_t        policy;
-    integer_t       suspend_count;
-};
-```
-
-本篇主线继续观察具体地址落入哪个 VM Region；`virtual_size`、`resident_size` 与 Memory Footprint 的差别放到下一篇内存记账文章中再展开。
+本篇主线继续观察具体地址落入哪个 VM Region。`task_basic_info`、`mach_task_basic_info` 等进程级汇总结构，以及 `virtual_size`、`resident_size` 与 Memory Footprint 的区别，放到系列下一篇 [[iOS 内存：Clean、Dirty、Compressed 与 Memory Footprint#先区分进程级汇总与逐个 VM Region|先区分进程级汇总与逐个 VM Region]] 中展开。
 
 到这里已经知道：
 

@@ -46,6 +46,57 @@ Apple 在 WWDC18《iOS Memory Deep Dive》中以典型的 16 KB 页面说明：�
 
 这里不能把"内存使用量"笼统地理解为所有虚拟地址范围。虚拟地址空间大小、当前驻留的物理页、堆分配量和系统用于限制 App 的 Memory Footprint 是不同指标。后文所说的 footprint，重点关注 App 需要系统保留的 dirty 与 compressed 页面，而 clean 页面可以从原始来源重新建立，因此记账方式不同。
 
+### 先区分进程级汇总与逐个 VM Region
+
+上一篇通过 VM Region 观察进程地址空间中的一段段连续范围；这一篇转向整个进程的内存汇总指标。`task_basic_info`、`mach_task_basic_info` 描述的是整个任务（进程）的虚拟内存和驻留内存汇总信息，不是单个 VM Region：
+
+```c
+/* 当前 SDK 的注释已明确建议改用 MACH_TASK_BASIC_INFO */
+struct task_basic_info {
+    integer_t       suspend_count;
+    vm_size_t       virtual_size;
+    vm_size_t       resident_size;
+    time_value_t    user_time;
+    time_value_t    system_time;
+    policy_t        policy;
+};
+
+struct mach_task_basic_info {
+    mach_vm_size_t  virtual_size;
+    mach_vm_size_t  resident_size;
+    mach_vm_size_t  resident_size_max;
+    time_value_t    user_time;
+    time_value_t    system_time;
+    policy_t        policy;
+    integer_t       suspend_count;
+};
+```
+
+这段代码只是两个返回结构的定义，本身不会主动统计内存。程序调用 Mach 的 `task_info()`，并选择 `MACH_TASK_BASIC_INFO`，系统才会把任务级数据写入 `mach_task_basic_info`。当前 SDK 已把 `task_basic_info` 标为旧接口，新的代码应使用始终采用 64 位大小字段的 `MACH_TASK_BASIC_INFO`。
+
+其中与本篇最相关的字段是：
+
+| 字段 | 回答的问题 | 不能直接推出什么 |
+| --- | --- | --- |
+| `virtual_size` | 进程建立或保留了多大的虚拟地址范围 | 不代表已经占用同等大小的物理 RAM |
+| `resident_size` | 当前有多少进程页面驻留在物理内存中 | 不等于 Xcode 展示的 Memory Footprint |
+| `resident_size_max` | 驻留内存曾经达到的最大值 | 不等于 footprint 峰值 |
+
+因此要区分两种观察尺度：
+
+```text
+VM Region / vmmap
+    → 逐段观察地址范围、权限和内容来源
+
+MACH_TASK_BASIC_INFO
+    → 观察整个进程的 virtual_size 与 resident_size 汇总
+
+TASK_VM_INFO.phys_footprint
+    → 观察更接近 iOS Memory Footprint 口径的进程责任内存
+```
+
+`virtual_size`、`resident_size` 与 `phys_footprint` 不能互相替代。后面的真机实验使用 `task_info(TASK_VM_INFO)` 读取 `phys_footprint`，正是因为本篇要研究的是 App 当前承担的内存责任，而不只是地址空间有多大或多少页面暂时驻留。
+
 ![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260724211423574.png)
 
 以上一篇实验代码中的 `RunMemoryExperiment`（见 [[iOS 内存：从虚拟地址空间到堆与栈|上一篇]]）为例：`malloc(32 * 1024)` 申请一段空间，与 `memset(heapBuffer, 0x5A, 1)` 真正触碰其中一个字节，并不是同一个动作。分配器可能先为程序准备可用的虚拟地址；当程序首次访问相应页面时，系统才通过按需分页机制建立页面支持。实际变化还会受到页面是否已经存在、写入是否落在同一页以及分配器元数据等因素影响，所以不能机械地推导出"每写一个字节，内存就一定增加 16 KB"。
