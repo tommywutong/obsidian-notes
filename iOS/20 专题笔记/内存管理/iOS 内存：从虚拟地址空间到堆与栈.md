@@ -418,13 +418,13 @@ VM Region 告诉我们"系统怎样描述"
 
 本次记录的实验环境为：
 
-| 项目 | 环境 |
-| --- | --- |
-| Xcode | 26.6 |
-| 运行环境 | iPhone 16 Pro Simulator，iOS 18.4，Apple Silicon Mac |
-| 构建方式 | Objective-C、Debug 信息、`-O0` |
-| 页面大小 | `vm_page_size = 16384`，即 16 KB |
-| 验证方式 | 在 `RunSimpleMemoryTest` 内设置断点，通过 LLDB 比较变量地址并查询 VM Region |
+| 项目    | 环境                                                        |
+| ----- | --------------------------------------------------------- |
+| Xcode | 26.6                                                      |
+| 运行环境  | iPhone 16 Pro Simulator，iOS 18.4，Apple Silicon Mac        |
+| 构建方式  | Objective-C、Debug 信息、`-O0`                                |
+| 页面大小  | `vm_page_size = 16384`，即 16 KB                            |
+| 验证方式  | 在 `RunSimpleMemoryTest` 内设置断点，通过 LLDB 比较变量地址并查询 VM Region |
 
 Simulator 与真机不完全相同，尤其是系统共享缓存、分配器实现、地址编码和内存压力行为。下面的基础步骤用于学习怎样观察地址；本节后半部分再用 iPhone 15 的两轮真机数据验证结论。无论哪种环境，都不能由一次运行推导所有 iPhone 的固定地址。
 
