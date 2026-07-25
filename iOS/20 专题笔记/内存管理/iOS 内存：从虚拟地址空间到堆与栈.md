@@ -93,11 +93,27 @@ Apple 当前文档指出，iOS 中典型的页大小是 16 KB；具体值仍应�
 - **页表（Page Table）**：记录虚拟页到物理页的映射及读、写、执行等权限。代码访问虚拟地址时，CPU 内部的 **MMU（Memory Management Unit）** 会依据页表完成地址转换。
 - **虚拟内存区域（VM Region）**：一段具有相同属性的连续虚拟地址范围。一个进程拥有许多 VM Region，但整个虚拟地址空间并非从头到尾连续有效。
 
+内核建立和管理虚拟内存映射时以页为基本粒度，但这不意味着每次 `malloc` 几个字节都会单独浪费一个 16 KB 页面。用户态内存分配器会先取得并管理较大的虚拟内存区域，再把其中的小块空间分给不同对象；这就是后文讨论“堆”时需要建立的连接。
+
+
 ### 按需分页与 Page Fault（缺页中断）
 
-某个虚拟地址落在进程已经建立的合法 VM Region 中，不等于对应页面已经驻留在物理 RAM。系统可以先建立地址范围和映射关系，等程序真正访问某一页时，再提供零填充页、从 Mach-O 或其他映射文件取得内容，或者完成 Copy-on-Write，然后继续执行原来的指令。
+![](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260725092731666.png)
 
-CPU 发现现有页表不能直接完成访问时，会触发 Page Fault 并交给内核处理。能够由内核补全映射的 Page Fault 是按需分页的正常机制，并不等同于崩溃；只有地址无效或访问权限冲突且内核无法修复时，才可能最终表现为 `EXC_BAD_ACCESS`。`EXC_BAD_ACCESS` 是非法内存访问的结果之一，不能简单等同于"野指针"。
+1. **虚拟映射与延迟分配 (Lazy Allocation)**  
+    当系统为进程分配内存，或通过 `mmap` 映射大文件（如动态库）时，仅仅是在进程的虚拟地址空间中划定了一块合法的 **VM Region**。**“建立虚拟地址映射”绝不等于“占用物理 RAM”**，此时物理内存的实际消耗为零。  
+    
+2. **触发调度 (Page Fault 机制)**  
+    当 CPU 首次真正读写某个尚未驻留在物理内存的虚拟页时，现有的页表无法完成地址转换，从而触发**缺页中断 (Page Fault)**。这是一个正常的、连接虚拟与物理空间的桥梁，并非程序错误。  
+    
+3. **内核介入与数据流转 (Page In/Out)**  
+    内核接管中断后，会根据该虚拟页的属性进行动态修复：  
+    • **读取数据 (Page In)：** 如果是映射文件，内核会从磁盘（Backing Store）中将对应的数据精确加载到物理内存页中。  
+    • **其他策略：** 内核也可能分配一个全零填充页 (Zero-Fill)，或者为只读共享页创建一个私有副本 (Copy-on-Write)。  
+    • **数据换出 (Page Out)：** 由于虚拟空间远大于物理内存，macOS 等系统会将不常用的物理页写回磁盘以腾出空间（注：iOS 无此 Swap 机制，转而依靠内存压缩与 Jetsam）。  
+    
+4. **异常边界 (EXC_BAD_ACCESS 的本质)**  
+    内核完成上述修复后，原指令会继续执行。**只有当 Page Fault 无法被内核修复时**（例如：访问了未映射的无效地址、或者是对只读的缺页尝试写入等权限冲突），系统才会判定为非法内存访问，并最终抛出 `EXC_BAD_ACCESS` 崩溃。因此，`EXC_BAD_ACCESS` 的底层实质，就是内核无能为力的致命缺页中断。
 
 这里先把 Page Fault 当作一个连接点：它解释了为什么"已经分配或映射虚拟地址"仍不代表"对应物理页已经到位"。系列下一篇讨论 `malloc`、首次写入和 Memory Footprint 时还会再次用到这个结论。Apple 的 [About the Virtual Memory System](https://developer.apple.com/library/archive/documentation/Performance/Conceptual/ManagingMemory/Articles/AboutMemory.html) 对 soft fault、hard fault 和 page-in 有进一步说明。
 
@@ -130,7 +146,7 @@ flowchart TB
 
 
 
-我们首先来讲讲，一个iOS APP是怎样获得内存的以便于后续的理解
+我们首先来讲讲，一个iOS APP是怎样获得内存的 以便于后续的理解
 ### 阶段一：App还没有运行
 
 这时候 App 的代码和数据存放在磁盘上的 Mach-O 文件中。
@@ -167,77 +183,70 @@ Mach-O 主要解释启动时已经存在的代码和全局数据，但程序运�
 无论一个地址属于代码、全局变量、堆还是栈，程序拿到的首先都是虚拟地址。CPU访问时经过页表查询到物理页，最终得到真实RAM中的数据
 
 
-
-
-
-
-
-
-##"五大分区"
+## “五大分区”
 
 这就是我们经常提到的五大分区
 
 ![Snapzy_2026-07-25_00-30-24_668.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/Snapzy_2026-07-25_00-30-24_668.png)
 
+- **代码区**：存放编译后的机器指令。在 iOS 中，主程序代码通常来自 Mach-O 的可执行映射。
+- **常量区**：用于概括字符串字面量、部分只读常量等内容。真实情况下，它们可能分布在多个只读 Section 中，并不一定组成一个连续区域。
+- **全局/静态区**：存放具有静态存储期的全局变量和静态变量。已初始化数据与零填充数据通常进入不同的 Mach-O Section。
+- **堆区**：承接运行时动态分配的数据，例如普通 Objective-C 对象和 `malloc` 返回的缓冲区。ARC 管理 Objective-C 对象的所有权，但 `malloc` 取得的内存仍需要与 `free` 配对。
+- **栈区**：每个线程都有自己的线程栈，用于支撑函数调用和临时状态。Debug、未优化时，部分局部变量可以在栈中观察到；优化后也可能进入寄存器。
 
-- **栈区**：创建临时变量时由编译器自动分配，在不需要的时候自动清除的变量的存储区。里面的变量通常是局部变量、函数参数等。在一个进程中，位于用户虚拟地址空间顶部的是用户栈，编译器用它来实现函数的调用。和堆一样，用户栈在程序执行期间可以动态地扩展和收缩。
-- **堆区**：那些由 new alloc 创建的对象所分配的内存块，它们的释放系统不会主动去管，由我们的开发者去告诉系统什么时候释放这块内存(一个对象引用计数为0是系统就会回销毁该内存区域对象)。一般一个 new 就要对应一个release。在ARC下编译器会自动在合适位置为OC对象添加release操作。会在当前线程Runloop退出或休眠时销毁这些对象，MRC则需程序员手动释放。堆可以动态地扩展和收缩。
-- **未初始化数据（静态区）**：程序运行过程内存的数据一直存在，程序结束后由系统释放
-- **已初始化数据（常量区）**：专门用于存放常量，程序结束后由系统释放
-- **代码段**：用于存放程序运行时的代码，代码会被编译成二进制存进内存的程序代码区
-- **内核区**：用于加载内核代码，预留1GB
-- **保留区**：内存有4MB保留，地址从低到高递增
-
-![Snapzy_2026-07-25_01-25-01_009.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/Snapzy_2026-07-25_01-25-01_009.png)
-
-😅😅😅
-
-下面用贯穿全文的实验代码把五类内容放在一起：
+“五大分区”是更多是一份用户分类，不包括进程中的所有真实映射。Framework、dyld shared cache、`mmap` 文件和 Guard Page 等内容，后文统一用 VM Region 解释。
 
 ```objc
-int globalInitialized = 11;
-int globalZeroInitialized;
-static int staticInitialized = 22;
-static NSString * const globalStringLiteral = @"global literal";
+#import <Foundation/Foundation.h>
+#include <stdlib.h>
 
-__attribute__((noinline, optnone))
-static void RunMemoryExperiment(void) {
-    volatile int localNumber = 33;
+int globalNumber = 10;
+static int staticNumber = 20;
+
+void RunSimpleMemoryTest(void) {
+    int localNumber = 30;
+    NSString *text = @"Hello";
     NSObject *object = [[NSObject alloc] init];
-    NSString *localLiteral = @"local literal";
+    void *buffer = malloc(100);
 
-    volatile int runtimeValue = 42;
-    NSNumber *taggedNumber = @(runtimeValue);
+    NSLog(@"global = %d", globalNumber);
+    NSLog(@"static = %d", staticNumber);
+    NSLog(@"local = %d", localNumber);
+    NSLog(@"text = %@", text);
+    NSLog(@"object = %@", object);
+    NSLog(@"buffer = %p", buffer); // 在这里设置断点
 
-    void *heapBuffer = malloc(32 * 1024);
-    memset(heapBuffer, 0x5A, 1);
-
-    // 在这里暂停并通过 LLDB 观察
-
-    free(heapBuffer);
+    free(buffer);
 }
 ```
 
-先用五大分区回答，再保留必要的边界：
+可以在 `viewDidLoad` 中调用：
+
+```objc
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    RunSimpleMemoryTest();
+}
+```
+
+先用五大分区回答这段代码：
 
 | 代码中的内容 | 教学模型中的位置 | 更准确的说明 |
 | --- | --- | --- |
-| `RunMemoryExperiment` 的机器指令 | 代码区 | 本次构建位于 Mach-O 的 `__TEXT,__text`，运行时区域权限为 `r-x` |
-| `@"global literal"`、`@"local literal"` | 常量区 | 本次构建中的字符串对象位于只读的 Mach-O 映射，运行时权限为 `r--` |
-| `globalInitialized`、`staticInitialized` | 全局/静态区 | 本次构建位于 `__DATA,__data` |
-| `globalZeroInitialized` | 全局/静态区 | 本次构建位于零填充的 `__DATA,__common`；不同工具链也可能显示为 `__bss` 等零填充 Section |
-| `localNumber` | 栈区 | Debug、`-O0` 下观察到它位于当前线程栈；优化后可能进入寄存器或被消除 |
-| 局部变量 `object` 本身 | 栈区 | 它是保存对象地址的局部强引用；优化后位置也可能变化 |
-| `[[NSObject alloc] init]` 创建的普通对象 | 堆区 | 本次运行中对象地址落在可读写的分配区域 |
-| 局部变量 `heapBuffer` 本身 | 栈区 | 它只保存 `malloc` 返回的地址 |
-| `malloc(32 * 1024)` 返回的缓冲区 | 堆区 | 分配器管理的可读写区域；只写入第一个字节不代表 32 KB 每一页都已被触碰 |
-| `taggedNumber` 指向的值 | 不对应普通堆对象 | 本次运行得到 Tagged Pointer，其值编码在指针中，不能把它当作普通对象地址查询 VM Region |
+| `RunSimpleMemoryTest` 的机器指令 | 代码区 | 通常来自 Mach-O 的 `__TEXT,__text`，运行时映射通常可读、可执行 |
+| `@"Hello"` 字符串字面量 | 常量区 | 字面量对象通常来自主程序的只读 Mach-O 映射 |
+| `globalNumber`、`staticNumber` | 全局/静态区 | 二者具有静态存储期，本例均为已初始化的可写数据 |
+| `localNumber` | 栈区 | Debug、`-O0` 下通常能在当前线程栈中观察到；优化后位置可能变化 |
+| 局部变量 `text`、`object`、`buffer` 本身 | 栈区 | 它们是保存地址的局部指针变量；优化后也可能进入寄存器 |
+| `[[NSObject alloc] init]` 创建的普通对象 | 堆区 | `object` 保存对象地址，对象本体通常来自动态分配区域 |
+| `malloc(100)` 返回的缓冲区 | 堆区 | `buffer` 保存缓冲区地址，缓冲区由分配器管理，最后需要 `free` |
+
+>五大分区是一种用途分类，但这些区域并不是在同一时刻、通过同一种方式产生的。代码、常量和全局/静态数据主要由 Mach-O 在 App 启动时带入虚拟地址空间；堆与线程栈则在 App 运行过程中由内存分配器和线程系统建立。下面分别分析这两条形成路径。
 
 
-
-## Mach-O：解释启动时映射进来的代码和数据
-
-Mach-O 不是"五大分区"之外的第六个分区。它是 iOS 可执行文件的组织格式，用来解释 App 启动前代码和全局数据保存在什么地方，以及启动后如何被映射进虚拟地址空间。
+##  Mach-O
+Mach-O是 iOS 可执行文件的组织格式，用来解释 App 启动前代码和全局数据保存在什么地方，以及启动后如何被映射进虚拟地址空间。
 
 Mach-O 的 Segment 描述可执行文件及装载映射的组织方式；操作系统教材中的 Segmentation 描述的是一种地址管理模型。二者名字相似，但不能混为一谈。
 
@@ -250,12 +259,11 @@ Mach-O 使用两层结构组织内容：
 
 | Segment / Section | 实验中的内容 | 典型运行权限 |
 | --- | --- | --- |
-| `__TEXT,__text` | `RunMemoryExperiment` 的机器指令 | `r-x` |
+| `__TEXT,__text` | `RunSimpleMemoryTest` 的机器指令 | `r-x` |
 | `__TEXT,__cstring` | C 字符串等字面量数据 | 随 `__TEXT` 映射；内容不可写，Region 可能因同一 Segment 包含代码而显示 `r-x` |
-| `__DATA_CONST,__cfstring` | Objective-C 字符串常量对象 | `r--` |
-| `__DATA_CONST,__const` | 指向全局字符串对象的常量指针等 | `r--` |
-| `__DATA,__data` | 已初始化的可写全局、静态变量 | `rw-` |
-| `__DATA,__common` | 本次构建中的未初始化外部全局变量，装载时零填充 | `rw-` |
+| `__DATA_CONST,__cfstring` | `@"Hello"` 等 Objective-C 字符串常量对象 | `r--` |
+| `__DATA,__data` | `globalNumber`、`staticNumber` 等已初始化的可写数据 | `rw-` |
+| `__DATA,__bss` / `__common` | 未初始化的全局、静态变量，装载时获得零填充空间 | `rw-` |
 
 这里还有两个容易忽略的区域：
 
@@ -272,18 +280,11 @@ Mach-O 中记录的是链接时虚拟地址、大小和权限等装载信息。�
 运行时地址 = Mach-O 中的链接地址 + ASLR Slide
 ```
 
-在最终实验二进制中，`RunMemoryExperiment` 的链接地址是 `0x10000103c`。同一份二进制连续启动两次，记录到的运行时地址分别为：
+同一份二进制连续启动两次时，`RunSimpleMemoryTest` 的绝对地址通常会发生变化。函数没有“搬到另一个 Section”，改变的是整份映像的加载基址。实验中不需要记忆任何固定十六进制地址，只需使用 `image lookup -n RunSimpleMemoryTest` 查看本次运行的结果。
 
-```text
-第一次：0x10472d03c
-第二次：0x102b9503c
-```
-
-函数没有"搬到另一个 Section"，改变的是整份映像的加载基址。比较地址时应该先判断它属于哪个映像，并结合 `image list`、`image lookup` 或 `vmmap` 获取加载地址，不能把不同运行中的绝对地址直接比较。
+比较地址时应该先判断它属于哪个映像，并结合 `image list`、`image lookup` 或 `vmmap` 获取加载地址，不能把不同运行中的绝对地址直接比较。
 
 这个关系也是符号化（Symbolication）的核心。崩溃日志或 `image lookup --address` 拿到的都是运行时地址：工具先根据地址落在哪个镜像的加载范围内，确定它属于哪个镜像（崩溃报告的 "Binary Images" 段会记录每个镜像的加载基址），再用该镜像自己的 slide 把运行时地址减回链接地址，最后拿这个链接地址去 dSYM 里查函数名和行号。用错镜像的 slide，或者把不同镜像、不同进程、不同次运行的绝对地址直接比较，都会得到没有意义的结果——这也是为什么调试时要先用 `image list` 确认加载基址，而不是直接比较两次运行记下的十六进制数。Apple 在 WWDC21 [Symbolication: Beyond the basics](https://developer.apple.com/videos/play/wwdc2021/10211/) 中完整演示了 Linker Address、Load Address 与 ASLR Slide 的关系。
-
-这一篇只需要掌握以上桥梁。Mach Header、Load Commands 的字段、dyld Rebase/Bind、符号解析和共享缓存内部结构，继续放在本地 [[20 专题笔记/编译链接与启动/Mach-O|Mach-O]] 专题中学习。
 
 ## 堆与线程栈：解释运行过程中出现的区域
 
@@ -311,20 +312,54 @@ object   ── 指针变量保存的值
               └── 普通情况下指向对象本体
 ```
 
-```text
-object  = 0x60000001c020    // 普通 NSObject 对象所在的分配区域
-&object = 0x16c24ad30       // 后台实验线程的栈区域
-```
+在基础实验中，`&object` 通常会和 `&localNumber` 落在同一个线程栈 Region；`object` 的值则通常落在分配器管理的可读写 Region。具体十六进制地址每次运行都可能变化，重要的是它们属于不同的地址范围。
 
-这正好证明"指针变量在栈上"和"对象在堆上"可以同时成立。但这句话仍有三个边界：
+这正好说明“指针变量在栈上”和“对象在堆上”可以同时成立。但这句话仍有三个边界：
 
-1. **编译器优化**：局部变量可能只存在于寄存器中，或者被完全消除，因此"局部变量一定在栈上"不严谨。
-2. **字符串字面量**：`@"local literal"` 在本次实验中落在主程序的只读映射内，并不是函数每执行一次就在堆上创建一个新字符串对象。
-3. **Tagged Pointer**：运行时值 `@(runtimeValue)` 在本次实验中得到 `0x8a8f68c2cc3e21bc`。使用 VM Region 查询该值失败，原因不是查询方式不对，而是这个"指针"从一开始就不指向任何已映射内存。64 位指针有富余的位数，远超过设备真实用到的虚拟地址位数；Objective-C runtime 借用其中一位作为标记位，一旦置位，其余位就不再是地址，而是被直接解释成"这是哪个类"（class index）加"具体的值"（payload），值和类型信息一起编码在指针本身里，不发生任何堆分配，ARC 对它的 retain/release 也是空操作。Tagged Pointer 的具体位布局属于 Runtime 私有实现，在不同架构、不同系统版本间可以变化，不应依赖某一位模式编写业务逻辑。
+1. **编译器优化**：局部变量可能只存在于寄存器中，或者被完全消除，因此“局部变量一定在栈上”不严谨。
+2. **字符串字面量**：`@"Hello"` 通常落在主程序的只读映射内，并不是函数每执行一次就在堆上创建一个新字符串对象。
+3. **Tagged Pointer**：部分小型 `NSNumber`、`NSDate`、`NSString` 等值可能直接编码在指针中，并不对应普通堆对象。它属于第二轮实验，本次基础代码暂不加入。
 
 因此，面试中回答"对象在哪里"时，至少需要先确认讨论的是普通动态对象、字面量对象，还是 Tagged Pointer；回答"变量在哪里"时，还要区分变量本身和变量保存的值。
 
 ## 用 VM Region 回到真实 iOS
+
+一个 VM Region 是指一段连续的内存页（在虚拟地址空间里），这些页拥有相同的属性（如读写权限、是否是 wired，也就是是否能被 page out）。举几个例子：
+
+- mapped file，即映射到磁盘的一个文件
+    
+- __TEXT，r-x，多数为二进制
+    
+- __DATA，rw-，为可读写数据
+    
+- MALLOC_(SIZE)，顾名思义是 malloc 申请的内存
+    
+
+`task_basic_info`、`mach_task_basic_info` 描述的是整个任务（进程）的虚拟内存和驻留内存汇总信息，不是单个 VM Region。它们可以作为进阶补充，用来区分“进程级汇总指标”和“逐个 Region 的地址地图”：
+
+```c
+/* 旧结构的注释已明确建议改用 MACH_TASK_BASIC_INFO */
+struct task_basic_info {
+    integer_t       suspend_count;
+    vm_size_t       virtual_size;
+    vm_size_t       resident_size;
+    time_value_t    user_time;
+    time_value_t    system_time;
+    policy_t        policy;
+};
+
+struct mach_task_basic_info {
+    mach_vm_size_t  virtual_size;
+    mach_vm_size_t  resident_size;
+    mach_vm_size_t  resident_size_max;
+    time_value_t    user_time;
+    time_value_t    system_time;
+    policy_t        policy;
+    integer_t       suspend_count;
+};
+```
+
+本篇主线继续观察具体地址落入哪个 VM Region；`virtual_size`、`resident_size` 与 Memory Footprint 的差别放到下一篇内存记账文章中再展开。
 
 到这里已经知道：
 
@@ -333,7 +368,7 @@ object  = 0x60000001c020    // 普通 NSObject 对象所在的分配区域
 - 每个线程拥有自己的栈；
 - 指针变量和对象本体可能位于不同区域。
 
-**五大分区按照用途分类，VM Region 则是内核描述一段连续虚拟地址范围的实际方式。一个 Region 具有起止地址、访问权限、内容来源等属性；同一教学分区可能由多个 Region 组成，一个 Mach-O Segment 在实际映射和保护过程中也不能简单等同于整张进程内存地图。
+**五大分区按照用途分类，VM Region 则是内核描述一段连续虚拟地址范围的实际方式。** 一个 Region 具有起止地址、访问权限、内容来源等属性；同一教学分区可能由多个 Region 组成，一个 Mach-O Segment 在实际映射和保护过程中也不能简单等同于整张进程内存地图。
 
 ### 两种常见来源：文件映射与匿名内存
 
@@ -379,7 +414,7 @@ VM Region 告诉我们"系统怎样描述"
 文件/匿名来源和页面状态继续解释"系统怎样回收与记账"（见系列下一篇）
 ```
 
-## 用 LLDB 与 VM API 验证地址分布
+## 用 LLDB 验证基础实验
 
 本次记录的实验环境为：
 
@@ -387,55 +422,66 @@ VM Region 告诉我们"系统怎样描述"
 | --- | --- |
 | Xcode | 26.6 |
 | 运行环境 | iPhone 16 Pro Simulator，iOS 18.4，Apple Silicon Mac |
-| 构建方式 | Objective-C、Debug 信息、`-O0`，关键函数额外使用 `optnone` |
+| 构建方式 | Objective-C、Debug 信息、`-O0` |
 | 页面大小 | `vm_page_size = 16384`，即 16 KB |
-| 验证方式 | 程序日志记录地址，并使用 `vm_region_64` 查询 Region 范围与权限；在 Xcode 中可用下列 LLDB 命令交叉验证 |
+| 验证方式 | 在 `RunSimpleMemoryTest` 内设置断点，通过 LLDB 比较变量地址并查询 VM Region |
 
 Simulator 与真机不完全相同，尤其是系统共享缓存、分配器实现、地址编码和内存压力行为。下面的结果用于验证"地址属于哪类 Region"和"权限有什么差异"，不能用来推导所有 iPhone 的固定地址。
 
-当程序停在 `RunMemoryExperiment` 内部时，可以执行：
+在 `NSLog(@"buffer = %p", buffer);` 这一行设置断点。程序停下后，先执行第一组命令，只比较“变量本身的地址”和“变量保存的地址”：
 
 ```lldb
-p/x &globalInitialized
-p/x &globalZeroInitialized
-p/x &staticInitialized
+p/x &globalNumber
+p/x &staticNumber
 p/x &localNumber
-p/x object
+p/x &text
+p/x text
 p/x &object
-p/x localLiteral
-p/x taggedNumber
-p/x heapBuffer
-
-image list
-image lookup --address 0x10472d03c
-memory region 0x10472d03c
-image dump sections MemoryMapExperiment
+p/x object
+p/x &buffer
+p/x buffer
 ```
 
-其中：
+这里应该先观察到三组关系：
 
-- `p/x expression` 以十六进制打印变量值；
-- `&variable` 查看变量本身的地址；
-- `image list` 查看主程序和依赖映像的加载地址；
-- `image lookup --address` 把运行时地址定位到映像、Segment/Section、符号和源码；
-- `memory region address` 查看该地址所在 VM Region 的范围和权限；
-- `image dump sections` 查看 LLDB 识别到的 Mach-O Section。
+1. `&globalNumber` 与 `&staticNumber` 通常落在主程序的可写数据映射中；
+2. `&localNumber`、`&text`、`&object`、`&buffer` 在 Debug、`-O0` 下通常落在当前线程的栈 Region；
+3. `text`、`object`、`buffer` 保存的地址与这些局部指针变量自己的地址不同。
 
-本次最终运行的关键结果如下：
+第一组理解之后，再检查这些地址分别属于哪个映像和 VM Region：
 
-| 观察对象 | 实际地址 | Region 与权限 | 解释 |
-| --- | --- | --- | --- |
-| `RunMemoryExperiment` | `0x10472d03c` | `0x10472c000–0x104730000 r-x` | 主程序机器指令 |
-| 全局字符串字面量 | `0x104730140` | `0x104730000–0x104734000 r--` | 主程序只读数据映射 |
-| `globalInitialized` | `0x104734740` | `0x104734000–0x104738000 rw-` | 已初始化的全局数据 |
-| `globalZeroInitialized` | `0x10473480c` | 同一 `rw-` Region | 零填充全局数据 |
-| `staticInitialized` | `0x104734808` | 同一 `rw-` Region | 已初始化静态数据 |
-| 主线程局部变量 | `0x16b6cf7dc` | `0x16aed8000–0x16b6d4000 rw-` | 主线程自己的栈区域 |
-| 后台线程 `localNumber` | `0x16c24ad3c` | `0x16c1c8000–0x16c250000 rw-` | 另一个线程的栈区域 |
-| 局部指针变量 `&object` | `0x16c24ad30` | 与后台线程局部变量相同 | 指针变量本身位于当前线程栈 |
-| 普通对象 `object` | `0x60000001c020` | 可读写分配区域 | 普通 Objective-C 对象本体 |
-| `heapBuffer` | `0x10880d400` | `0x108800000–0x109000000 rw-` | `malloc` 管理的区域 |
-| `taggedNumber` | `0x8a8f68c2cc3e21bc` | VM Region 查询失败 | 值编码在 Tagged Pointer 中，不是普通对象地址 |
+```lldb
+image lookup -n RunSimpleMemoryTest
+image list
+```
+
+`image lookup` 用来确认函数属于主程序的 `__TEXT,__text`。对于其他变量，先复制 `p/x` 得到的实际地址，再执行：
+
+```lldb
+memory region 0x实际地址
+```
+
+例如，假设本次 `object` 打印为 `0x600000012340`，就执行：
+
+```lldb
+memory region 0x600000012340
+```
+
+这里的地址只是命令格式示例，不是固定结果。ASLR、分配器和每次运行状态都会改变绝对地址。
+
+基础实验应当得到下面这些“关系结果”：
+
+| 观察对象 | 预期的 Region 特征 | 能说明什么 |
+| --- | --- | --- |
+| `RunSimpleMemoryTest` | 主程序映像中的 `r-x` 区域 | 函数机器指令属于代码映射 |
+| `text` 指向的 `@"Hello"` | 主程序的只读映射，具体权限以当次构建为准 | 字符串字面量不是每次调用都新建的普通堆对象 |
+| `globalNumber`、`staticNumber` | 主程序映像中的 `rw-` 区域 | 已初始化的全局、静态变量来自可写数据映射 |
+| `&localNumber` | 当前线程的 `rw-` 栈 Region | 局部整数在本次 Debug 实验中位于线程栈 |
+| `&text`、`&object`、`&buffer` | 通常与 `&localNumber` 位于同一个栈 Region | 局部指针变量本身也属于当前函数的临时状态 |
+| `object` | 分配器管理的可读写 Region | 普通 Objective-C 对象本体通常在堆中 |
+| `buffer` | 分配器管理的可读写 Region | `malloc` 返回的是动态缓冲区地址 |
+
+不要比较表中的“地址大小关系”，而要比较它们属于哪个映像、哪个 Region、具有怎样的权限。再次运行时绝对地址变化是正常现象。
 
 ### 从单个地址扩展
 

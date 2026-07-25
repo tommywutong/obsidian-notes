@@ -83,6 +83,10 @@ Compressed 只会发生在 dirty 页面身上：clean 页面在压力下直接�
 
 ## iOS 内存压力与回收
 
+
+![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260725093622870.png)
+
+
 ### iOS 没有传统意义上的磁盘 Swap
 
 桌面操作系统通常可以把一部分匿名内存换出到磁盘。Apple 的 iOS 虚拟内存资料和 WWDC18《iOS Memory Deep Dive》强调：iOS 不把普通 App 的 dirty page 当作传统磁盘 swap 的后备存储来使用。
