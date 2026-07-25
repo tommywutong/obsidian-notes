@@ -368,6 +368,44 @@ object   ── 指针变量保存的值
 - MALLOC_(SIZE)，顾名思义是 malloc 申请的内存
     
 
+内核为每个内存区域关联一个VM Object，负责追踪这块区域里面哪些页面当前在屋里内存中，哪些不在
+
+| 字段             | 作用                      |
+| -------------- | ----------------------- |
+| Resident pages | 当前在物理内存中的页面列表           |
+| Size           | 区域大小（字节）                |
+| Pager          | 负责管理该区域与后备存储之间换页的组件     |
+| Shadow / Copy  | 用于写时复制（Copy-on-Write）优化 |
+| Attributes     | 各种状态标志                  |
+VM Object 通过 **Pager（换页器）​** 来决定一个内存区域对应的是什么数据源。这里有两种 Pager：
+
+**Default Pager（默认换页器）​** 负责管理普通的虚拟内存页面，也就是我们之前说的 swap 机制——把换出的页面存到后备存储里，需要时再取回来。
+
+**Vnode Pager（文件换页器）​** 则实现了**内存映射文件（memory-mapped file）​**的访问。它把磁盘上的文件直接映射到进程的虚拟地址空间，让你可以像读写内存一样读写文件，而不需要显式调用 `read()`/`write()`。这也是为什么 App 的代码页可以被直接"丢弃"后重新从磁盘加载——代码本来就是通过 Vnode Pager 映射进来的，磁盘上的原始文件就是它的数据源。
+
+
+### Wired Memory
+![Snapzy_2026-07-25_16-04-41_230.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/Snapzy_2026-07-25_16-04-41_230.png)
+用户层的 App 无法主动分配 Wired Memory，但 App 的行为会间接影响它的用量。文章给出了一张具体的数字表，很有参考价值：
+![Snapzy_2026-07-25_16-12-44_745.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/Snapzy_2026-07-25_16-12-44_745.png)
+这意味着你的 App 创建的每一个线程、每一个 Mach Port（进程间通信的基础单元），都在悄悄消耗内核的 Wired Memory。
+
+
+### 三个物理内存页面列表
+
+内核在内部维护三个全局链表来追踪所有物理内存页面的状态：
+
+- **Active List（活跃列表）​**：最近被访问过的页面，正在被使用
+- **Inactive List（非活跃列表）​**：最近没有被访问的页面，是换出的候选目标
+- **Free List（空闲列表）​**：完全空闲、可以立即分配的页面
+
+这三个列表之间的页面会动态流转。内核持续监控 Free List 的大小，一旦低于某个阈值，就会触发换页器开始工作——从 Inactive List 里找页面，把它们换出去，补充 Free List。
+
+在 **OS X** 中，如果一个非活跃页面含有被修改过的数据，必须先把它写到后备存储，才能放入 Free List。
+
+在 **iOS** 中，被修改过但非活跃的页面**必须留在内存里**，由拥有它的 App 自己负责清理——这就是为什么 iOS 会发送内存警告，要求 App 主动释放。
+
+
 `task_basic_info`、`mach_task_basic_info` 描述的是整个任务（进程）的虚拟内存和驻留内存汇总信息，不是单个 VM Region。它们可以作为进阶补充，用来区分“进程级汇总指标”和“逐个 Region 的地址地图”：
 
 ```c
