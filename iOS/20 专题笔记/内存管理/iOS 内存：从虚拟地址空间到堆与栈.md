@@ -426,7 +426,7 @@ VM Region 告诉我们"系统怎样描述"
 | 页面大小 | `vm_page_size = 16384`，即 16 KB |
 | 验证方式 | 在 `RunSimpleMemoryTest` 内设置断点，通过 LLDB 比较变量地址并查询 VM Region |
 
-Simulator 与真机不完全相同，尤其是系统共享缓存、分配器实现、地址编码和内存压力行为。下面的结果用于验证"地址属于哪类 Region"和"权限有什么差异"，不能用来推导所有 iPhone 的固定地址。
+Simulator 与真机不完全相同，尤其是系统共享缓存、分配器实现、地址编码和内存压力行为。下面的基础步骤用于学习怎样观察地址；本节后半部分再用 iPhone 15 的两轮真机数据验证结论。无论哪种环境，都不能由一次运行推导所有 iPhone 的固定地址。
 
 在 `NSLog(@"buffer = %p", buffer);` 这一行设置断点。程序停下后，先执行第一组命令，只比较“变量本身的地址”和“变量保存的地址”：
 
@@ -482,6 +482,66 @@ memory region 0x600000012340
 | `buffer` | 分配器管理的可读写 Region | `malloc` 返回的是动态缓冲区地址 |
 
 不要比较表中的“地址大小关系”，而要比较它们属于哪个映像、哪个 Region、具有怎样的权限。再次运行时绝对地址变化是正常现象。
+
+### iPhone 15 真机实测
+
+为了确认 Simulator 上的结论能否在真实 iOS 环境中复现，我另外建立了一个最小 Objective-C 实验 App `MemoryMapLab`。真机环境如下：
+
+| 项目 | 环境 |
+| --- | --- |
+| 设备 | iPhone 15（iPhone15,4，arm64e） |
+| 系统 | iOS 26.5 |
+| Xcode | 26.6 |
+| 构建方式 | Objective-C、Debug、`-O0`，实验函数使用 `noinline` 与 `optnone` 保持可观察性 |
+| 页面大小 | `sysconf(_SC_PAGESIZE) = 16384`，即 16 KB |
+| Region 数据来源 | App 对自身地址调用 `vm_region_64`，同时输出地址、Region 范围和当前权限 |
+
+第一轮启动取得的代表性结果如下：
+
+| 观察对象 | 运行时地址 | 所在 Region 与权限 | 说明 |
+| --- | --- | --- | --- |
+| `RunMemoryExperiment` | `0x102eb4e14` | `0x102eb0000–0x102eb8000 r-x` | 函数机器指令位于主程序的可执行映射 |
+| `globalInitialized` | `0x102ebc958` | `0x102ebc000–0x102ec0000 rw-` | 已初始化全局变量位于可写数据映射 |
+| `staticInitialized` | `0x102ebc95c` | `0x102ebc000–0x102ec0000 rw-` | `static` 改变链接可见性，不会因此形成一个独立“静态区” |
+| `globalZeroInitialized` | `0x102ebc960` | `0x102ebc000–0x102ec0000 rw-` | 零初始化变量运行时同样需要可写存储 |
+| `&globalStringLiteral` | `0x102eb80d8` | `0x102eb8000–0x102ebc000 r--` | 这是全局常量指针变量自己的地址 |
+| `globalStringLiteral` 指向的字面量对象 | `0x102eb8120` | `0x102eb8000–0x102ebc000 r--` | 字符串字面量本体位于只读映射 |
+| `&localNumber` | `0x16cf4c96c` | `0x16ce54000–0x16cf50000 rw-` | 本次 Debug 构建中局部整数位于主线程栈 |
+| `&object` | `0x16cf4c960` | `0x16ce54000–0x16cf50000 rw-` | 局部指针变量本身与其他局部状态位于线程栈 |
+| `object` 指向的 `NSObject` | `0x107d98ba0` | `0x107c00000–0x108000000 rw-` | 对象本体位于分配器管理的可写 Region |
+| `malloc` 返回的缓冲区 | `0x107eb0000` | `0x107c00000–0x108000000 rw-` | 堆并非一个独立、连续且边界固定的“大盒子” |
+| `@(runtimeValue)` | `0x9af4dd61519470e0` | 无普通 VM Region | 本次运行生成了 Tagged Pointer，没有单独的普通堆对象地址 |
+
+这里最重要的不是记住这些十六进制数，而是观察地址之间的关系：
+
+1. 函数、只读字面量、可写全局数据分别落入 `r-x`、`r--`、`rw-` 的映像 Region；
+2. 局部指针变量和它指向的对象本体是两个地址，前者本次位于栈，后者位于分配器管理的区域；
+3. 普通对象与 `malloc` 缓冲区虽然都可归入教学模型中的“堆”，系统看到的却是分配器管理的 VM Region；
+4. Tagged Pointer 的值不是一个可以交给 `memory region` 查询的普通对象地址。其具体编码属于运行时实现细节，不能依赖本次位模式。
+
+为了验证 ASLR，完全退出并第二次启动同一份二进制，得到以下代表性变化：
+
+| 观察对象 | 第一轮 | 第二轮 |
+| --- | --- | --- |
+| `RunMemoryExperiment` | `0x102eb4e14` | `0x1041a0e14` |
+| `globalInitialized` | `0x102ebc958` | `0x1041a8958` |
+| 字符串字面量对象 | `0x102eb8120` | `0x1041a4120` |
+| `&localNumber` | `0x16cf4c96c` | `0x16bc6096c` |
+| `NSObject` 对象本体 | `0x107d98ba0` | `0x1091acad0` |
+
+主程序中的函数、全局数据和字面量跟随同一个 Mach-O 映像整体移动，权限和相对布局保持一致；栈和堆地址则由线程栈、分配器和当次运行状态分别决定，不能拿它们与 Mach-O 的 slide 做同一种推导。这正是“ASLR 改变装载基址，但不会把代码突然变成堆内存”的真机证据。
+
+需要明确数据来源：上表的地址与 Region 是实验 App 通过 `vm_region_64` 对自身查询后记录的，不是伪装成 LLDB transcript 的输出。要在 Xcode 中独立复核，可以给 `MemoryExperimentBreakpoint` 添加符号断点；停下后先用 `up` 回到 `RunMemoryExperiment`，再执行：
+
+```lldb
+frame variable localNumber object localLiteral runtimeValue taggedNumber heapBuffer
+p/x &globalInitialized
+p/x &globalZeroInitialized
+p/x &staticInitialized
+p/x globalStringLiteral
+memory region &globalInitialized
+memory region heapBuffer
+```
 
 ### 从单个地址扩展
 
