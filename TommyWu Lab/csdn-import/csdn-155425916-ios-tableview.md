@@ -1,5 +1,6 @@
 ---
 title: "【iOS】TableView的优化"
+slug: "ios-tableview-optimization"
 published: 2025-11-30
 description: "一、优化的本质 UITableView 的优化本质在于提高滚动性能和减少内存使用，以保证流畅的用户体验，从计算机层面来讲，其核心本质为降低 CPU和GPU 的工作来提升性能 CPU：对象的创建和销毁、对象属性的调整、布局计算、文本的计算和排版、图片的格式转换和解码、图像的绘制 G"
 tags: ["iOS", "UITableView", "性能优化"]

@@ -1,5 +1,6 @@
 ---
 title: "【iOS】MVVM"
+slug: "ios-mvvm"
 published: 2025-12-09
 description: "MVC模式 MVC的前世： 这个架构中，三个实体联系太过紧密，每个实体都知道另外的两个实体。这就导致了复用性能急剧下降。 apple MVC : 苹果官方推荐使用的MVC，结构大致如下：https://developer.apple.com/library/archive/doc"
 tags: ["iOS", "MVVM", "架构"]
@@ -325,7 +326,7 @@ RAC是函数响应式编程（FRP）框架。ReactiveCocoa结合了几种编程�
 关于这个第三方库的具体内容笔者现在还没有具体了解，具体的使用以及源码的相关内容会在后续更新。
 
 
-![外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传](https://img-home.csdnimg.cn/images/20230724024159.png?origin_url=https%3A%2F%2Fraw.githubusercontent.com%2FBiscoffee%2Fpiccbes%2Fmaster%2F%E5%BE%AE%E4%BF%A1%E5%9B%BE%E7%89%87_20251209150308_469_51.jpg&pos_id=img-YaVCR2KL-1765280989857)
+![img](./csdn-155750158-ios-mvvm-images/15-wechat-20251209150308.jpg)
 
 ---
 

@@ -1,5 +1,6 @@
 ---
 title: "【iOS】Oc语言学习 —— Foundation框架总结"
+slug: "ios-foundation-framework-summary"
 published: 2025-05-18
 description: "1、NSString类 我们对一个NSString对象赋值的方法是直接将字符串常量赋给对象，例如： NSString str = @\"hello\"; 因为我们的NSString是不可变的，所以我们只能通过一些方法来在我们原来的字符串后面追加或初始化我们的字符串来间接修改我们的对象"
 tags: ["Objective-C", "Foundation"]

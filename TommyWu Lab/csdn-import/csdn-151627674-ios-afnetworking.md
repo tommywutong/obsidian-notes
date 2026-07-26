@@ -1,5 +1,6 @@
 ---
 title: "【iOS】AFNetworking"
+slug: "ios-afnetworking"
 published: 2025-09-14
 description: "文件构成 AFURLSessionManager AFHTTPSessionManager 一次完整的GET请求过程 1. 初始化和配置 2. GET请求 3. 添加请求头的GET POST请求 举例：Spotify内容的获取 文件构成 AFNetworking的构成很简单，主要"
 tags: ["iOS", "AFNetworking", "网络"]

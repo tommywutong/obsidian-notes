@@ -27,17 +27,46 @@ draft: true
 
 ## 二、可用的实验手段
 
-这台机器有 Xcode 26.6（Apple clang 21）、iOS 模拟器（arm64）、lldb、otool、nm、xcrun、sqlite3。能做的事比想象的多：
+### ⚠️ 先看这条：默认不要开模拟器
+
+**绝大多数实验根本不需要模拟器。** Objective-C runtime、Foundation、Block、GCD、锁、KVC/KVO、内存管理——这些直接编成 macOS 原生二进制跑就行，结果和模拟器上一致（已实测对照过 KVC setter 搜索链、集合运算符返回类型、isa 位域与 extra_rc 溢出，输出逐字相同）。
+
+**默认写法**（不碰模拟器）：
 
 ```shell
-SDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
-clang -fobjc-arc -isysroot "$SDK" -target arm64-apple-ios17.0-simulator \
-      -framework Foundation -o out prog.m
-xcrun simctl spawn booted ./out            # 在模拟器里真跑
-clang ... -S -emit-llvm -O0 -o out.ll      # 看 IR
-clang ... -S -O0 -o out.s                  # 看汇编
-clang -fno-objc-arc ...                    # MRC 对照
+clang -fobjc-arc -framework Foundation -o out prog.m && ./out
+clang -fno-objc-arc -framework Foundation -o out_mrc prog.m && ./out_mrc   # MRC 对照
+clang -fobjc-arc -S -emit-llvm -O0 -o out.ll prog.m                        # 看 IR
+clang -fobjc-arc -S -O1 -o out.s prog.m                                    # 看汇编
+```
+
+**只有这几类才需要模拟器**：UIKit（UIView / UIViewController / UITableView / 事件传递）、iOS 专属的系统行为、需要 iOS 版本门控的差异。
+
+需要时的纪律，三条都是硬性的：
+
+1. **先查有没有已经开着的**，有就复用，不要再 boot：
+   ```shell
+   xcrun simctl list devices booted | grep Booted
+   ```
+2. **同一时刻只允许存在一台。** 不要 boot 第二台。
+3. **用完立刻关**，不要留给下一个人：
+   ```shell
+   xcrun simctl shutdown <udid>
+   ```
+
+违反这三条的后果是真实发生过的：一批 agent 各自 boot 一台、谁也不清理，堆到 18 GB 内存、540 个进程，把用户的机器逼到可用内存 39%，整批工作被迫中止。**开模拟器之前先问一句：这个实验真的需要 UIKit 吗？**
+
+写作时如果实验是 macOS 原生跑的，在「实验环境」一节如实写明（`clang -framework Foundation`，macOS arm64），不要谎称在模拟器上跑。涉及 iOS 与 macOS 可能有差异的结论（分片数、tagged pointer 布局、系统版本相关行为），要么去模拟器复核一次，要么标注"未在 iOS 上复核"。
+
+### 编译选项对照
+
+```shell
 clang -fobjc-runtime=ios-12.0 ...          # runtime 版本门控对照
+clang -target x86_64-apple-macos13 ...     # 换架构对照
+# 确实需要 iOS 环境时：
+SDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
+clang -fobjc-arc -isysroot "$SDK" -target arm64-apple-ios17.0-simulator -framework Foundation -o out prog.m
+xcrun simctl spawn booted ./out
 ```
 
 常用招式：

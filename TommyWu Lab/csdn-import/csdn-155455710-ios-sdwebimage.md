@@ -1,5 +1,6 @@
 ---
 title: "【iOS】SDWebImage解析"
+slug: "ios-sdwebimage"
 published: 2025-12-01
 description: "笔者最近在完成抖音关注页面的仿写过程中了解到可以使用SDWebImage来进行头像加载的优化，当时只来得及了解其简单使用。现在有时间了，准备了解一下他的内部源码实现。 一、简介 SDWebImage是iOS中提供图片加载的第三方库，可以给UIKit框架中的控件比如 UIImage"
 tags: ["iOS", "SDWebImage"]

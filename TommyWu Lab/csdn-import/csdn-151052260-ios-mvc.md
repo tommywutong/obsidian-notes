@@ -1,5 +1,6 @@
 ---
 title: "【iOS】MVC架构"
+slug: "ios-mvc"
 published: 2025-08-31
 description: "目录 1 前言 2 MVC简单介绍 胖Model 和瘦Model 3 MVC的问题 1. 视图控制器过于臃肿 2. view和controller的边界很模糊 为了解决这些缺点，衍生出了许多改进的架构模式： \"MVC\"，即Model（模型），View（视图），Controller"
 tags: ["iOS", "MVC", "架构"]
@@ -79,7 +80,7 @@ draft: false
 通俗来说，**就是如何使你的模型呈现给用户**，比如让View 上呈现Model 的数据，就是Controller 的工作。所以你可以把Controller 看成是连接Model 和View 的桥梁。
 
 
-用户点击 View–> 视图响应事件 -->通过代理传递事件到Controller–>发起[网络请求](https://so.csdn.net/so/search?q=%E7%BD%91%E7%BB%9C%E8%AF%B7%E6%B1%82&spm=1001.2101.3001.7020)更新Model—>Model处理完数据–>代理或通知给Controller–>改变视图样式–>完成
+用户点击 View–> 视图响应事件 -->通过代理传递事件到Controller–>发起网络请求更新Model—>Model处理完数据–>代理或通知给Controller–>改变视图样式–>完成
 
 
 ![图片](./csdn-151052260-ios-mvc-images/01-f6f20ec663234c8b8065d091e63a02ff.png)

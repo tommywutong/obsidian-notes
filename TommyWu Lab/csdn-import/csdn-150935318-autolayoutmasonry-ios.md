@@ -1,5 +1,6 @@
 ---
 title: "【iOS】AutoLayout与Masonry：简化iOS布局"
+slug: "ios-autolayout-masonry"
 published: 2025-09-04
 description: "Auto Layout 与 Masonry 苹果提供的自动布局（Auto Layout）能够对视图进行灵活有效的布局。但是，使用原生的自动布局相关的语法创建约束的过程是非常冗长的，可读性也比较差。 Masonry 的目标其实就是 为了解决原生自动布局语法冗长的问题 。 其实说到本"
 tags: ["iOS", "AutoLayout", "Masonry"]

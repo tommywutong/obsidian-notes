@@ -1,5 +1,6 @@
 ---
 title: "【iOS】KVO"
+slug: "ios-kvo"
 published: 2025-11-09
 description: "In order to understand key value observing, you must first understand key value coding. KVC是键值编码 ，在对象创建完成后，可以 动态的给对象属性赋值 ，而 KVO是键值观察 ，提供了一种监"
 tags: ["iOS", "Objective-C", "KVO"]

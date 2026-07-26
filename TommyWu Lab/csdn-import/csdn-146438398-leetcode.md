@@ -1,5 +1,6 @@
 ---
 title: "Leetcode经典链表问题之反转链表"
+slug: "reverse-linked-list"
 published: 2025-03-22
 description: "206. 反转链表 力扣（LeetCode） 92. 反转链表 II 力扣（LeetCode） 反转链表2，只反转部分链表 关于哨兵节点 哨兵节点的作用 ✅ (1) 确保 m 1 位置正确连接 • 反转部分链表时，m 1 位置的节点需要正确指向反转后的 m 位置。 • 哨兵节点"
 tags: ["算法", "LeetCode", "链表"]

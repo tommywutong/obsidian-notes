@@ -1,5 +1,6 @@
 ---
 title: "【iOS】alloc、init、new"
+slug: "ios-alloc-init-new"
 published: 2025-10-14
 description: "1. alloc 进入到alloc的源码里面，我们发现alloc调用了 objc rootAlloc方法，而 objc rootAlloc调用了callAlloc方法。 具体内容本人暂时也一知半解，贴一张图 alloc为我们创建了1个对象并申请了一块不小于16字节的内存空间 具体"
 tags: ["iOS", "Objective-C", "初始化"]

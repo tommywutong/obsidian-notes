@@ -1,5 +1,6 @@
 ---
 title: "【iOS】UIViewController"
+slug: "ios-uiviewcontroller"
 published: 2025-09-14
 description: "目录 ​编辑 视图加载： 视图可见性 viewWillAppear： viewDidAppear： viewWillDisappear： 总结 视图加载： 视图初始化会设计两个方法：loadView和ViewDidload 当新添加一个视图控制器时，通过xcode生成的代码模版只"
 tags: ["iOS", "UIViewController"]

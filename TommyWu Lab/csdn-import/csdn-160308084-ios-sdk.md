@@ -1,5 +1,6 @@
 ---
 title: "【iOS】SDK"
+slug: "ios-sdk"
 published: 2026-04-19
 description: "SDK SDK 是Software Development Kit的缩写,译为” 软件开发工具包 ”,通常是为辅助开发某类软件而编写的特定软件包,框架集合等, SDK 一般包含相关 文档 , 范例 和 工具 。客户端 SDK，顾名思义，是集成在应用客户端的 SDK。SDK 作为产"
 tags: ["iOS", "SDK"]

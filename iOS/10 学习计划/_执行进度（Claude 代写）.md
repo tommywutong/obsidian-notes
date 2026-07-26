@@ -104,8 +104,71 @@ draft: true
 
 ### 第三周：Runtime 行为与对象通信（Runtime/、Runtime 与对象通信/）
 - [ ] 08 补完 `Runtime/Part 4 - Runtime 应用篇.md`
-- [ ] 09 KVC 与 KVO：搜索顺序、isa-swizzling 与手动触发
-- [ ] 10 Cocoa 对象通信四件套：delegate / notification / target-action / block 回调选型
+- [x] 11 KVC 与 KVO：搜索顺序、isa-swizzling 与手动触发（Runtime 与对象通信/）—— Day 5，待审查
+      **实测硬料**：
+      - `setValue:forKey:` 的 setter 链实测是 `set<Key>:` → `_set<Key>:` → **`setIs<Key>:`**。
+        第三步在归档文档和 `NSKeyValueCoding.h` 注释里**都没有**。用一个无 ivar、无属性、
+        接管了 `setValue:forUndefinedKey:` 当哨兵的类隔离验证，哨兵没响。`_setIs<Key>:` 不在链上。
+      - `@sum` / `@avg` 返回 `NSDecimalNumber`，**不是文档说的 double**。`@[@0.1,@0.2]` 得精确的 0.3
+        （double 是 0.30000000000000004），`@avg` 输出 38 位有效数字，元素上收到的选择器是 `decimalValue`。
+      - `dladdr` 反查中间类 IMP：`_NSSetIntValueAndNotify` / `_NSSetBoolValueAndNotify` /
+        `_NSSetDoubleValueAndNotify` / `_NSSetRectValueAndNotify` / `_NSSetObjectValueAndNotify`，
+        `class` → `NSKVOClass`，`dealloc` → `NSKVODeallocate`。`long double` 属性根本不 KVC 兼容，setter 不被替换。
+      - **`automaticallyNotifiesObserversForKey:` 对某 key 返回 NO 时，KVO 完全不 isa-swizzle。**
+        同一个类里 auto key 会建中间类、manual key 不会；两个都观察时中间类只覆写 auto 那个 setter。
+      - 移除全部观察者后**实例 isa 会还原**成原类，Class 对象常驻并在下次复用（流行说法"不还原"是错的）。
+      - 观察者 dealloc 后 `NSKeyValueObservance` 的 `Observer` 字段变成 `0x0`（zeroing weak），
+        之后设值 5000 次不崩；被观察对象带着观察者 dealloc 也不抛异常。
+        官方依据：Foundation Release Notes for macOS 10.13 and iOS 11 的
+        "Relaxed Key-Value Observing Unregistration Requirements"（已一手核对原文）。
+        **但手动通知的类也不抛，这超出 release note 承诺的两个条件，文中已标注不可依赖。**
+      - `-isMemberOfClass:` 返回 YES 是因为实例版实现就是 `[self class] == cls`（已与 03 篇对账，
+        初稿把它误写成 `object_getClass(self) == cls`，已改）。
+      - KVC 落到 ivar 时是 **retain 不是 copy**：`NSMutableString` 写进 `copy` 属性后外部改动可见。
+      - `NSUndefinedKeyException` 常量的字符串值是 `NSUnknownKeyException`（头文件有注释）。
+      - Swift：`@objc` 无 `dynamic` 时直接赋值不通知、`setValue:forKey:` 通知；纯 Swift 属性走不到 KVO；
+        `NSKeyValueObservation` deinit 自动注销；`observe` 无 `@discardableResult`（实测有 unused 警告）。
+- [ ] 12 Cocoa 对象通信四件套：delegate / notification / target-action / block 回调选型
+- [x] 13 Method Swizzling：正确姿势、+load 时机与那些坑（Runtime 与对象通信/）—— Day 2 + Day 4，待审查
+      定位：`Runtime/Part 4` 与 `Runtime/Method - Swizzling.md` 的**实证补充**，不重复原理与场景。
+      **实测硬料**：
+      - 直接 exchange 继承来的方法，后果不是"父类被污染"这么温和：`Parent` 和 `Sibling` 当场
+        `-[Parent hook_greet]: unrecognized selector` 崩溃，崩溃栈却显示 `-[Child(Hook) hook_greet]`。
+        hook 不回调原实现时才退化成静默的全局行为改变，且 `class_copyMethodList` 查不出来。
+      - **人人在抄的 `class_addMethod` 模板本身有 bug**：它把父类当时的 IMP 冻成裸指针。
+        子类先 swizzle、父类后 swizzle 时父类 hook 被静默跳过（`C(origin)` vs `C(P(origin))`）。
+        RSSwizzle 的 `originalImpProvider` block 是标准解法（已一手核对 RSSwizzle.m 205-219 行）；
+        Aspects 用 `AspectTracker` 直接禁止同继承链重复 hook（错误串已一手核对 Aspects.m 619 行）。
+      - 模板还有**递归窗口**：`class_addMethod` 已生效、`class_replaceMethod` 未执行的那一瞬间，
+        调用目标方法无限递归（实测打印到第 5 层）。`method_exchangeImplementations` 单次调用没有此窗口。
+      - **现在的链接器（ld-1267）默认把同二进制内的 category 合并进类**，`__objc_catlist` 整个消失，
+        category 的 `+load` 变成类的 `+load`，走父类优先规则，正好掩盖上面那个 bug。
+        `man ld` 的 `-no_objc_category_merging` 原文已核对。独立复现：主类不写 `+load` 时默认无 catlist，
+        加 `-Wl,-no_objc_category_merging` 后 `__objc_catlist`/`__objc_nlcatlist` 回来。
+        主类自己写了 `+load` 就合并不了（一个类塞不下两个），catlist 重新出现。
+      - **`+load` 不一定在 `main()` 之前、不一定在主线程**：后台线程 `dlopen` 触发的 `+load`
+        实测 `pthread_main_np()` 返回 0，且发生在 `main()` 之后。
+      - `+load` 里访问别的类：类已 realize、消息发得出去，但对方 `+load` 未必跑过。
+        同一份代码只调换两个 `.m` 在 clang 命令行上的位置，`[Late banner]` 一次 nil 一次正常。
+        并且发消息会触发对方的 `+initialize`，出现"`+initialize` 早于它自己的 `+load`"。
+      - `+initialize` 实测被调 4 次（继承链上每个未实现的类各一次，`self` 各不同）；
+        主类的 `+initialize` 被 category 的完全覆盖，**一次都没跑**。
+      - 命名冲突实测：两个 category 用同名 swizzled selector，方法列表里并排躺着 2 条 `a_work`，
+        先注册那一方的实现**一次都没执行**；第三次 exchange 把前两层 hook 一起撤销。
+      - **交换类方法时 `class_addMethod` 必须打在 `object_getClass(cls)` 上**，打成 `cls` 返回 YES、
+        不报错、hook 静默失效，只是给类加了两条没人调的实例方法。类和元类 `class_getName` 同名。
+      - Swift：`@objc` 无 `dynamic` 时 `class_getInstanceMethod` 找得到、交换"成功"、`perform` 走 hook，
+        但 Swift 侧调用点走 vtable 看不见 hook（半失效，最难查）。纯 Swift 方法不在方法表里。
+        objc4 `prepare_load_methods` 对 Swift 类的 category `+load` 是 `_objc_fatal`。
+      - `_objc_msgForward` 转发式 hook 跑通：`respondsToSelector:` 保持 YES，
+        `forwardInvocation:` 拿到的是真 selector。`class_getMethodImplementation` 对不响应的 selector
+        返回的正是 `_objc_msgForward`（`0x18006b860`，两个实验对上）。
+        `_objc_msgForward_stret` / `objc_msgSend_stret` 在 SDK 头文件里标了 `OBJC_ARM64_UNAVAILABLE`，
+        老文章里整段 stret 讨论对今天的 iOS 已无对象。
+      **一手源码已核对**：`objc-loadmethod.mm`（`call_load_methods` / `call_class_loads`）、
+      `objc-runtime-new.mm`（`addMethod` / `class_addMethod` / `class_replaceMethod` /
+      `method_exchangeImplementations` / `schedule_class_load` / `load_images` / `prepare_load_methods`）、
+      `objc-initialize.mm`（`callInitialize` 与 radar 2157218 注释）、`man ld`、SDK `objc/message.h`。
 
 ### 第四周：线程、GCD、Operation 与锁（并发与运行循环/）
 - [ ] 11 GCD 重写：队列 / 同步异步 / 死锁 / group / barrier / semaphore

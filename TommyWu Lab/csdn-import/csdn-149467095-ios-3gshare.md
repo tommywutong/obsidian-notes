@@ -1,5 +1,6 @@
 ---
 title: "【iOS】3Gshare项目总结与思考"
+slug: "ios-3gshare-project-review"
 published: 2025-09-06
 description: "目录 登陆注册及推出主页面 自动登录 登陆 自动收起键盘 注册 HomeVC SearchVC 上传图片： ArticleVC MyVC 我的信息 评论 && 活动通知 && 我的推荐 新关注的 私信： 设置 Tips： 登陆注册及推出主页面 这部分有两种写法：一种是在Scene"
 tags: ["iOS", "项目"]

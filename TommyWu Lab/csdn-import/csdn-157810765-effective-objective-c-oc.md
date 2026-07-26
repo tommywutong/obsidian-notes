@@ -1,5 +1,6 @@
 ---
 title: "【iOS】Effective Objective-C 熟悉Oc"
+slug: "effective-objc-basics"
 published: 2026-02-12
 description: "熟悉Objective C 了解Objective C语言的起源 1. 使用消息结构的语言，其运行时所执行的代码由运行环境决定，使用函数调用的语言，则由编译器决定 详细说说： 在C语言中，编译器在编译阶段或链接阶段就已经知道了函数在内存中的地址（或相对偏移量），他生成的汇编指令是"
 tags: ["Objective-C", "Effective Objective-C"]

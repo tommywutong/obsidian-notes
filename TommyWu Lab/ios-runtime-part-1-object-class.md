@@ -10,18 +10,6 @@ seriesOrder: 1
 draft: false
 ---
 
----
-title: "【iOS】Runtime - Part 1 && 对象与类的本质"
-published: 2026-05-31
-description: "从 objc_object、isa_t、Tagged Pointer、对象内存布局一路拆到类与对象的本质，梳理 Objective-C Runtime 中对象如何关联到类。"
-tags: ["iOS", "Objective-C", "Runtime", "isa", "objc4"]
-category: "iOS"
-series: "iOS Runtime 系列"
-seriesSlug: "ios-runtime"
-seriesOrder: 1
-draft: false
----
-
 # Runtime 简介
 
 写 Objective-C 的人,每天都在敲这样的代码:

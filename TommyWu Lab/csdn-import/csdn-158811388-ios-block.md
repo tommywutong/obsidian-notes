@@ -1,5 +1,6 @@
 ---
 title: "【iOS】block"
+slug: "ios-block"
 published: 2026-03-08
 description: "block 对应结构体的定义如下： 图中我们可以看到，isa其实有六个部分 isa指针，所以对象都有isa指针。这就证明了 block其实本质上就是一个Objective C对象 ，他的值通常是这三种 NSConcreteGlobalBlock (全局区：没捕获任何外部变量) N"
 tags: ["iOS", "Objective-C", "Block"]

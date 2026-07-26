@@ -1,5 +1,6 @@
 ---
 title: "【iOS】KVC总结"
+slug: "ios-kvc"
 published: 2025-10-10
 description: "什么是KVC KVC 的全称是Key Value Coding（键值编码），是由NSKeyValueCoding非正式协议启用的一种机制，对象采用这种机制来提供对其属性的间接访问，可以通过字符串来访问一个对象的成员变量或其关联的存取方法（getter or setter）。 通常"
 tags: ["iOS", "Objective-C", "KVC"]
