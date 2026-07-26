@@ -89,9 +89,18 @@ draft: true
       长字符串 / NSArray / NSDictionary 的 copy 返回同一对象；容器 mutableCopy 只复制一层；
       `copy` 修饰 NSMutableArray 实际存进 `__NSSingleObjectArrayI`，addObject: 抛 unrecognized selector。
 - [ ] 07 weak 的实现：SideTable、weak_table_t 与置 nil 时机（内存管理/）—— Day 2
-- [ ] 08 Block 的结构：ABI、descriptor 与三种类型（Block/）—— Day 3
-- [ ] 09 Block 的变量捕获与 __block（Block/）—— Day 4
-- [ ] 10 Block 循环引用与 weak-strong dance（Block/）—— Day 5
+- [x] 07 weak 的实现：SideTable 与置 nil 的时机（内存管理/）—— Day 2，已过审重写
+- [x] 08 Block 的结构：ABI、descriptor 与三种类型（Block/）—— Day 3，审查中
+      **实测硬料**：`clang -rewrite-objc` 在当前 Xcode 已彻底失效（`action RewriteObjC not compiled in`），
+      而八成中文教程的论证建立在它上面。改用手写 `Block_layout` 强转读内存 + IR。
+      **测量假象**：`show(const char*, id blk)` 这种中转函数会触发 ARC copy，导致「ARC 下看不到栈 block」的错觉。
+      把参数类型换成非 `id` 之后，`__NSStackBlock__` 就出现了。
+- [x] 09 Block 的变量捕获与 __block（Block/）—— Day 4，审查中
+      **实测硬料**：同一个 `&shared`，Block 创建前是栈地址 `0x16d6160c0`，创建后在**同一作用域外部**
+      打印变成堆地址 `0x60000020c0f8`，与 Block 内部一致。这是 `__forwarding` 最短的证明路径。
+- [x] 10 Block 循环引用与 weak-strong dance（Block/）—— Day 5，审查中
+      **实测硬料**：五种写法的泄漏对照，其中 **ARC 下 `__block` 修饰对象照样泄漏**（验证了 09 篇的断言）；
+      weakSelf 的 block 里两次读同一变量得到 `A` 和 `null`，dance 之后两次都是 `B` 且事后无泄漏。
 
 ### 第三周：Runtime 行为与对象通信（Runtime/、Runtime 与对象通信/）
 - [ ] 08 补完 `Runtime/Part 4 - Runtime 应用篇.md`
