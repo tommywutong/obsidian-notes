@@ -187,6 +187,32 @@ draft: true
 
 **第二条教训**：weak 那篇里，我在参考资料里挂了两篇标题写着 "Swift 4" 的文章，正文却抄了 Swift 4 之前的实现。**引了勘误却抄了被勘误的内容——列进参考资料不等于读过。**
 
+第三批（Block 捕获篇复审）：
+
+| 原来写的 | 实际 |
+| --- | --- |
+| 函数内 static「编译器捕获的是它的地址」 | **根本不进 Block 结构体**。只碰它的 Block size 仍是 32，flags 带 `BLOCK_IS_GLOBAL`，连堆都不上。错误来源是老 `-rewrite-objc` 产物——而我上一篇刚说过 rewriter 不是真实 codegen |
+| 「ARC 下 `__block` 修饰对象照样被持有」 | 结论对，但**是全文唯一没有实验支撑的断言**。补上决定性证据：同一句 `__block id`，ARC 编出 byref layout=`STRONG(3)`，MRC 编出 `UNRETAINED(5)` |
+| 「编译器改写所有对该变量的访问走 forwarding」 | 说满了。声明处的初始化直接写字段，销毁时传的也是栈上那份 |
+| `BLOCK_HAS_COPY_DISPOSE` = 捕获了对象 | `__block int` 也置位（要处理 byref 搬家）；捕获 `__weak` 也置位但调的是 `objc_copyWeak` |
+| `Block_byref` 四字段 | 三段拼接，后两段由 flags 决定。`__block int` 的 byref size=32，`__block id` 是 48 |
+
+**教训**：审查指出一个结构性问题——**全文最重要的断言是唯一没有实验的那条**，而已有实验的两节反而在重复前后篇的内容。篇幅分配和信息价值成反比。往后落笔前先问：这篇最核心的那句话，证据在哪。
+
+第四批（Block 结构篇 + 循环引用篇复审）：
+
+| 原来写的 | 实际 |
+| --- | --- |
+| 「MRC 下捕获普通 id 不 retain，ARC 才 retain」 | **说反了**。MRC 下 block copy 会 retain（retainCount 1→2）；不 retain 的是 `__block id`。而这跟我上一篇刚验的 byref layout 数据直接矛盾，隔一小时没对上 |
+| `BLOCK_IS_NOESCAPE`「我不知道什么时候会被设」 | 答案就在我列在参考资料**第一位**的 Clang 文档 enum 上方三行。而且真相更好：Apple 出货的 clang 根本没实现这条 codegen（上游期望 `_NSConcreteGlobalBlock`+`0xD0800000`，Apple 实测 `_NSConcreteStackBlock`+`0xC0000000`） |
+| `BLOCK_USE_STRET`「别拿它判断返回值类型」 | 截断式误引。文档下一句就说它和 `(1<<30)` 配成对，`(3<<29)` 才有意义 |
+| 「ARC 下 `__block` 打不破环」 | 结论对但框架错。正确说法：**ARC 默认跟 strong，显式写 `__block __unsafe_unretained` 就能断环**（实测已释放）。变的是所有权修饰符的默认值，libclosure 一行没改 |
+| 「调用空 block 跳到地址 0」 | 崩在**取 invoke 字段**那一步，`EXC_BAD_ACCESS address=0x10`，跳转从未发生 |
+| `if (block) block()` 的竞态是悬垂指针 | ARC 已在调用点插了 retain/release。真正的问题是 TOCTOU；atomic 下连悬垂窗口都没有 |
+| 「查复杂的环用 Memory Graph」 | Memory Graph 只标 **unreachable**。NSTimer/NotificationCenter 那类环的根是 RunLoop 和通知中心，对象**可达**，什么都不会报——照这句去查会得到"没问题"的错误结论 |
+
+**审查也有说错的时候**：它说 `-Warc-retain-cycles` 对间接环"一概不报"，实测经函数传参的形态照样报。**审查结论同样要验。**
+
 **捡到的最好素材**：`objc_loadWeakRetained` 正上方那段注释——"Once upon a time we eagerly cleared \*location... So we now don't touch the storage until deallocation completes."。我花一整节用实验证明的事，Apple 在源码里亲口解释了为什么这么设计。这类"源码注释里的设计自述"是最值钱的引用，以后每篇都该主动去翻。
 
 **顺带确认了 19 位那个数字的真实归属**：只存在于无指针认证的 arm64（A7~A11，iPhone 5s 到 iPhone X）。arm64e 真机、所有 iOS 模拟器、所有 x86_64 都是 8 位——也就是说它在 Intel Mac 上从来没成立过。
