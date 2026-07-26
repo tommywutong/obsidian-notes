@@ -168,7 +168,17 @@ draft: true
 | 属性关键字 | `tintColor` 设 nil 回到系统默认色 | 是沿 superview 链找第一个非默认值，找不到才落到系统默认 |
 | 属性关键字 | Block 属性 copy vs strong「实测没观察到差异」 | 不是没观察到，是 clang AST 里规定等价（`isBlockPointerType() ? Copy : Retain`）。但 `retain` 真的只 retain 不 copy，有专门警告 |
 
+| weak | Swift 用双计数器 + 对象变僵尸 | 那是 Swift 3 的行为。Swift 4 起是三计数（strong/unowned/weak），side table 惰性分配，weak 变量指向 side table 而非对象，对象内存在 unowned 归零时就 free |
+| weak | MRC 下能直接用 `objc_storeWeak`，只是没有 `__weak` 语法糖 | MRC 写 `__weak` 是硬编译错误；但 `-fobjc-weak` 一开就能用。zeroing weak 和 ARC 是可拆开的两个特性 |
+| weak | 结构图里把哈希函数写成了 key | 那一层 key 是对象地址，`((addr>>4)^(addr>>9))%StripeCount` 是 `indexForPointer` 映射。**一篇立论"每层 key 都不同"的文章，最外层自己写混了** |
+| weak | 「DEALLOCATING 置位」 | nonpointer isa 上没有这个位，`isDeallocating()` 就是 `extra_rc == 0 && has_sidetable_rc == 0` |
+| weak | 不支持 weak 的类（照抄 2012 年名单） | iOS 26.5 SDK 上只剩 `NSMachPort` / `NSMessagePort`，UIKit 一个都没有。一行 grep 就能查 |
+
 **教训**：两次采样凑巧支持了一个"有意思"的结论，就加粗写进正文和总结。**样本不足时不要下方向性结论，更不要为它补机制。**
+
+**第二条教训**：weak 那篇里，我在参考资料里挂了两篇标题写着 "Swift 4" 的文章，正文却抄了 Swift 4 之前的实现。**引了勘误却抄了被勘误的内容——列进参考资料不等于读过。**
+
+**捡到的最好素材**：`objc_loadWeakRetained` 正上方那段注释——"Once upon a time we eagerly cleared \*location... So we now don't touch the storage until deallocation completes."。我花一整节用实验证明的事，Apple 在源码里亲口解释了为什么这么设计。这类"源码注释里的设计自述"是最值钱的引用，以后每篇都该主动去翻。
 
 **顺带确认了 19 位那个数字的真实归属**：只存在于无指针认证的 arm64（A7~A11，iPhone 5s 到 iPhone X）。arm64e 真机、所有 iOS 模拟器、所有 x86_64 都是 8 位——也就是说它在 Intel Mac 上从来没成立过。
 
