@@ -134,6 +134,44 @@ draft: true
 
 > 母计划第八阶段还要求一个"综合小项目"作为收口作品——这需要在 Xcode 里跑通完整 App，超出纯文档范围，暂列为待议项。
 
+## 三点五、审查轮发现的错误（存档，避免重犯）
+
+第一批四篇过审查后改掉的硬错误。共同点很明显：**凡是来自记忆或转述的断言都出过错，凡是来自编译产物的断言都对。**
+
+| 文章 | 原来写的 | 实际 |
+| --- | --- | --- |
+| Tagged Pointer | ivar 重排能省内存（照抄流行说法） | `{char a; id b;}` 和 `{id b; char a;}` 都是 24，**一个字节不省**；要两个以上小成员能合并才见效 |
+| Tagged Pointer | 除标记位外所有位每次启动都变 | `bit62` 三次纹丝不动且按类分组；低 3 位是标签索引，跨启动被置换而非异或。**我自己的数据就能证伪自己的结论** |
+| Tagged Pointer | 对象最少 16 字节来自 malloc 粒度 | 来自 objc4 的 `if (size < 16) size = 16;`，注释写着 CF 要求。malloc 粒度解释的是 24→32 那档 |
+| Tagged Pointer | arm64 用 `OBJC_MSB_TAGGED_POINTERS` | 用 `OBJC_SPLIT_TAGGED_POINTERS`，标签索引在低位。LSB 只出现在 Intel Mac 的原生 macOS 进程，iOS 模拟器不算 |
+| Tagged Pointer | 关联对象"语义有问题" | 能设能读不崩；真正的问题是两个同值对象共享同一份 + 永不 dealloc 导致永久泄漏 |
+| Tagged Pointer | 并发赋值崩溃的例子 | 必须写 `nonatomic`，atomic 的 setter 在锁内换槽位恰恰不会过度释放 |
+| MRC | `extra_rc` = retainCount − 1 | **就是 retainCount**（`initIsa` 里 `extra_rc = 1`）。正因如此旧版的 `deallocating` 位被删了 |
+| MRC | isa 里有 `deallocating` 位 | 没有，靠 `extra_rc == 0 && has_sidetable_rc == 0` 推 |
+| MRC | 快速路径四个条件都在 isa 位里 | `has_cxx_dtor` 在 arm64e/模拟器上不在 isa 里（`ISA_HAS_CXX_DTOR_BIT` 为 0），要查类标志 |
+| MRC | `PROTECT_AUTORELEASEPOOL` 是 Debug 开关 | 发布版 objc4 里**根本没定义**，要自己重编 libobjc |
+| ARC | `objc_alloc_init` 出自 WWDC20 | 是 iOS 13：`-fobjc-runtime=ios-12.0` 只有 `objc_alloc`，`ios-13.0` 才有 |
+| ARC | 返回值优化靠读调用方指令流 | arm64 已换成 TLS 暂存 + 返回地址差值（4/8），读指令降级为兜底。x86_64 仍走老路 |
+| ARC | 合成 getter 不插桩是因为编译器判定 ivar 不会被释放 | 是 CodeGen 对合成访问器的专门捷径：手写同形状代码照样生成 `retainAutoreleaseReturnValue` |
+| ARC | `objc_claimAutoreleasedReturnValue` 在 Clang ARC 规范里 | 规范里没有，是 objc4 自己加的入口点 |
+| ARC | ARC 完全不追踪引用关系 | 强引用不追踪；`__weak` 恰恰是在 SideTable 里记"谁指向我" |
+
+第二批（属性关键字复审 + weak）：
+
+| 文章 | 原来写的 | 实际 |
+| --- | --- | --- |
+| 属性关键字 | `nonatomic copy` 的 setter 是编译器内联 | 走 `objc_setProperty_nonatomic_copy`。clang `PropertyImplStrategy` 里写死："If we have a copy property, we always have to use setProperty." |
+| 属性关键字 | atomic 丢得比 nonatomic 多，因为抢锁变慢、重叠窗口变大 | **纯属编造**。标量属性的 atomic/nonatomic setter 是逐字节相同的 `str`，不碰 PropertyLocks。跑满六次两边互有胜负，是噪声。我只跑两次就下了方向性结论还配了机制 |
+| 属性关键字 | weak 比直接指针访问慢一个量级 | 实测 2.7–4.1 倍（weak 46ns vs strong 11–17ns），不是 10 倍 |
+| 属性关键字 | `objc_storeStrong` 返回 id、`objc_storeWeak` 返回 void | 正好写反了；且 `shouldCopy` 是 `signed char` 不是 `BOOL`（要容纳 `MUTABLE_COPY = 2`） |
+| 属性关键字 | 这些访问器函数都没有公开声明 | `objc_storeWeak` / `objc_loadWeak` 在 `objc/runtime.h` 里是公开 API |
+| 属性关键字 | `tintColor` 设 nil 回到系统默认色 | 是沿 superview 链找第一个非默认值，找不到才落到系统默认 |
+| 属性关键字 | Block 属性 copy vs strong「实测没观察到差异」 | 不是没观察到，是 clang AST 里规定等价（`isBlockPointerType() ? Copy : Retain`）。但 `retain` 真的只 retain 不 copy，有专门警告 |
+
+**教训**：两次采样凑巧支持了一个"有意思"的结论，就加粗写进正文和总结。**样本不足时不要下方向性结论，更不要为它补机制。**
+
+**顺带确认了 19 位那个数字的真实归属**：只存在于无指针认证的 arm64（A7~A11，iPhone 5s 到 iPhone X）。arm64e 真机、所有 iOS 模拟器、所有 x86_64 都是 8 位——也就是说它在 Intel Mac 上从来没成立过。
+
 ## 四、变更日志
 
 - 2026-07-26：第一次对齐，确认范围 / 约定 / 34 篇清单。文档 03、04 的实验已在 `/tmp/ios-notes-lab/` 跑通，正文未写。会话因权限分类器不可用中断，重建本台账。
