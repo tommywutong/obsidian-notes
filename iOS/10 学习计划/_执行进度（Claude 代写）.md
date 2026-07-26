@@ -50,18 +50,23 @@ draft: true
 
 `[ ]` 未开始 · `[~]` 进行中 · `[x]` 完成
 
-### 第一周：对象、类与所有权（内存管理/）
-- [x] 01 iOS 内存：从虚拟地址空间到堆与栈 —— 已有，待收尾
-- [x] 02 iOS 内存：Clean、Dirty、Compressed 与 Memory Footprint —— 已有
-- [~] 03 iOS 对象模型：Tagged Pointer 与 isKindOfClass/isMemberOfClass
-      实验：模拟器下 NSNumber/NSString 指针低位 + `malloc_size` == 0 判定（**已跑通，数据在手**）；类对象 / 元类作为 receiver 的 4 组比较（**已跑通**）
-- [~] 04 iOS 内存：从 MRC 到 ARC —— retain/release/autorelease 语义与编译器插入
-      实验：`clang -S -emit-llvm` 看 `objc_storeStrong` / `objc_retainAutoreleasedReturnValue` / `objc_opt_new`（**IR 已生成，读到一半**）
+### 第一周：对象、类与所有权
+- [x] 01 iOS 内存：从虚拟地址空间到堆与栈（内存管理/）—— 已有，待收尾
+- [x] 02 iOS 内存：Clean、Dirty、Compressed 与 Memory Footprint（内存管理/）—— 已有
+- [x] 03 iOS 对象模型：类型判断、内存对齐与 Tagged Pointer（对象模型/）
+      对应计划 Day 3。实验全部真跑：10 组类型判断、ivar 偏移与两种对齐、Tagged Pointer 探针、
+      三次启动的混淆器对照、字面量常量折叠对照、`CFGetRetainCount` = INT64_MAX。
+      **修正**：arm64 标记位在 **bit63**，不是网上常说的最低位；`malloc_size == 0` 不足以判定 tagged。
+- [ ] 04 iOS 内存：MRC 的所有权规则（内存管理/）—— 对应 Day 4
+- [ ] 05 iOS 内存：ARC 的两半，编译器插桩与 runtime 支持（内存管理/）—— 对应 Day 5
+      素材：`arc_demo.ll` 已生成于 `/tmp/ios-notes-lab/w1d4-5/`
 
-### 第二周：weak、属性关键字与 Block（内存管理/）
-- [ ] 05 属性关键字全景：assign/strong/copy/weak/atomic 与 setter 生成
-- [ ] 06 weak 的实现：SideTables、weak_entry_t 与置 nil 时机
-- [ ] 07 Block：三种类型、变量捕获、copy 时机与循环引用
+### 第二周：weak、属性关键字与 Block
+- [ ] 06 属性关键字全景：所有权、深浅拷贝与 setter 生成（内存管理/）—— Day 1
+- [ ] 07 weak 的实现：SideTable、weak_table_t 与置 nil 时机（内存管理/）—— Day 2
+- [ ] 08 Block 的结构：ABI、descriptor 与三种类型（Block/）—— Day 3
+- [ ] 09 Block 的变量捕获与 __block（Block/）—— Day 4
+- [ ] 10 Block 循环引用与 weak-strong dance（Block/）—— Day 5
 
 ### 第三周：Runtime 行为与对象通信（Runtime/、Runtime 与对象通信/）
 - [ ] 08 补完 `Runtime/Part 4 - Runtime 应用篇.md`
