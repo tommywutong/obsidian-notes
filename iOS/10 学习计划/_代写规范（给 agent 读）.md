@@ -24,6 +24,7 @@ draft: true
 4. **列进参考资料不等于读过。** 曾经引了两篇标题写着 "Swift 4" 的文章，正文却抄了 Swift 4 之前的实现。
 5. **警惕测量假象。** 观察手段可能改变被观察对象——曾经用 `id` 类型的参数去读 Block，ARC 在传参时插了 copy，于是"测出"ARC 下没有栈 Block。遇到结果和预期不符，**先怀疑仪器，再怀疑结论**。
 6. **跨篇对账。** 写第 N 篇时如果结论和前面某篇的数据有关，回去对一遍。曾经隔一小时写出两条互相矛盾的结论。
+7. **要下"网上说的不对"这种结论，先列一遍这个实验有几个自变量。** 曾经为了定 chained fixups 的切换阈值，把部署目标从 12.0 编到 17.0 一共八次，测出 13.4，于是写下"流传的 iOS 15 是记混了"。加一个 `-simulator` 重跑就发现模拟器的阈值真的是 15.0——版本这个维度扫了八遍，平台这个维度一次没动。**跑了实验只能保证你测的那个组合是对的，保证不了它覆盖了读者会遇到的组合。**
 
 ## 二、可用的实验手段
 
@@ -40,7 +41,26 @@ clang -fobjc-arc -S -emit-llvm -O0 -o out.ll prog.m                        # 看
 clang -fobjc-arc -S -O1 -o out.s prog.m                                    # 看汇编
 ```
 
-**只有这几类才需要模拟器**：UIKit（UIView / UIViewController / UITableView / 事件传递）、iOS 专属的系统行为、需要 iOS 版本门控的差异。
+### UIKit 也未必需要模拟器：先试 Mac Catalyst
+
+这条是 2026-07-27 验出来的，能省掉大部分模拟器需求。**Mac Catalyst target 编出来的是原生 macOS 二进制，但链接和加载的是真正的 `UIKitCore`**，直接 `./out` 就跑，不 boot 任何设备：
+
+```shell
+SDK=$(xcrun --sdk macosx --show-sdk-path)
+clang -fobjc-arc -target arm64-apple-ios17.0-macabi -isysroot "$SDK" \
+      -iframework "$SDK/System/iOSSupport/System/Library/Frameworks" \
+      -framework Foundation -framework UIKit -o out prog.m && ./out
+```
+
+已经用它做成的事：`class_getIvarLayout` / `class_getWeakIvarLayout` 直接问 runtime 拿到 `UIGestureRecognizerTarget._target` 是 weak（`weakIvarLayout=01`、`ivarLayout` 为 null），比手工解析 Mach-O 的 `class_ro_t` 可靠得多，也不用管 chained fixups 的指针高位。
+
+适合 Catalyst 的：UIKit 私有类的结构与 ivar 语义、`UIView` / `CALayer` 的树结构和 `frame`/`bounds`/`transform` 换算、`hitTest:` 与响应者链的算法、`UIViewController` 的生命周期回调顺序、`UITableView` 的复用与代理调用顺序。这些都是 UIKitCore 里同一份代码。
+
+不适合 Catalyst 的：触摸事件的真实输入路径、屏幕 scale 与安全区、iOS 专属的系统行为、任何和 AppKit 桥接层相关的表现。**凡是结论可能受 Catalyst 桥接影响的，要么标注"Catalyst 上实测，未在 iOS 复核"，要么按下面的纪律开一台模拟器复核一次。**
+
+注意：直接 `dlopen` `/System/iOSSupport/.../UIKitCore` 会报 `wrong platform to load into process`，必须整个二进制编成 macabi target。
+
+**剩下这几类才真的要模拟器**：iOS 专属的系统行为、版本门控差异、Catalyst 上表现存疑需要复核的结论。
 
 需要时的纪律，三条都是硬性的：
 

@@ -128,7 +128,47 @@ draft: true
       - `NSUndefinedKeyException` 常量的字符串值是 `NSUnknownKeyException`（头文件有注释）。
       - Swift：`@objc` 无 `dynamic` 时直接赋值不通知、`setValue:forKey:` 通知；纯 Swift 属性走不到 KVO；
         `NSKeyValueObservation` deinit 自动注销；`observe` 无 `@discardableResult`（实测有 unused 警告）。
-- [ ] 12 Cocoa 对象通信四件套：delegate / notification / target-action / block 回调选型
+- [x] 12 对象通信：delegate、通知、target-action 与 block 回调（Runtime 与对象通信/）—— 待审查
+      **全程零模拟器**：Foundation / runtime 部分一律 macOS 原生 `clang -framework Foundation`；
+      UIKit 部分改用**静态二进制分析**（解析磁盘上 UIKitCore 的 `class_ro_t`），不 boot 任何设备。
+      **实测硬料**：
+      - 静态解出四个类的 target 所有权：`UIControlTargetAction._target` = weak（`ivarLayout 01` /
+        `weakIvarLayout 11`，按 `instanceStart=8` 解 nibble），`_actionHandler` = strong；
+        **`UIGestureRecognizerTarget._target` 也是 weak** —— 而 Apple 对手势 target 的持有语义只字未提；
+        `UIBarButtonItem._target` weak / `_primaryAction` strong；`UIAction._handler` strong 且全类无 weak ivar
+        （`addAction:` 成环的结构性证据）。二进制有 chained fixups，指针字段要取低 36 位。
+      - **纠正上一版初稿的硬错误**：初稿写"运行时靠参数个数分辨"，正是简报点名要驳的"数冒号"说法。
+        官方原文是 "pushes two parameters"。实测统一按两参数发，0/1/2 参签名全部正常返回；
+        少传则读到寄存器残留（`0x120a8`）。ARC 下这个实验会崩（给入参插了 retain），必须 `-fno-objc-arc`。
+      - 协议方法**永远没有 IMP**：clang `CGObjCMac.cpp:7674` 原文已核对
+        （"Protocol methods have no implementation. So, this entry is always NULL."），
+        内存直读印证 `impOffset=0`。注意方法列表现在默认是 **small 相对偏移格式**（entsize=12），
+        按老的 `{SEL,char*,IMP}` 三指针解析会段错误。
+      - `protocol_copyMethodDescriptionList` 四选一各调一次全部跑通（含 optional 类方法）；
+        它不递归父协议，`protocol_getMethodDescription` 递归 —— 两个 @note 正好相反。
+      - `-[NSObject conformsToProtocol:]` 的继承链是**它自己的 for 循环**走的
+        （`NSObject.mm:2506` 已核对原文），`class_conformsToProtocol` 不走 superclass 只递归父协议
+        （`strcmp(mangledName)` 见 `objc-runtime-new.mm:5298`）。实测 LiarSub 上两者给相反答案。
+      - `respondsToSelector:` 会触发 `+resolveInstanceMethod:`（delegate 高频路径上的隐藏成本）。
+      - 通知：同步派发、跑在 post 线程、通配与具名按注册序混排（证伪 GNUstep 三张表说法）；
+        观察者抛异常掐断整条链并传回 post 方；post 期间新增本轮不生效、移除会被跳过
+        （"快照 + 逐项校验"，纯快照模型预测 A,B,C 实际 A,B）。
+      - **`queue:` 非 nil 不等于异步**：block 里 sleep 300ms，post 稳定花 303~305 ms（3 次）。
+        注册 mainQueue + 主线程等 post ⇒ 死锁（wait 返回 49），换 nil 正常。
+        **修正上一版**："post 恰好在目标 queue 上耗时 0.0 ms"不复现，实测满额 302/325/305 ms。
+      - 四种 target 语义并置：UIControl 不 retain（weak 是实现非契约，AppKit `NSControl.h` 反而写了
+        weak，已从本机 SDK 核对原文）、手势无任何文档、NSTimer 强持有到 invalidate（实测）、
+        NSInvocation 默认不 retain 参数、`retainArguments` 后才 retain（实测）。
+      - iOS 9 免移除的四类边界；zombie 下 selector 观察者不移除无残留消息，block 版 token 丢了照跑。
+      - 开销（macOS 原生，-O1，3 次稳定）：直接发消息 2.56 / delegate 完整写法 26.5 /
+        block 0.32 / postNotificationName: 213 ns。读 weak 16.5 ns 是 delegate 的大头。
+        10 万条死记录对 post 耗时无影响（1.01×），代价是 0.43 MB。
+      - **测量假象三次**：small 方法列表解析段错误；ARC 给入参插 retain 导致残留实验崩溃；
+        `unsafe_unretained` delegate 量出 13 ns 其实是**属性 getter 上 ARC 的 retain/release**
+        （直接读 ivar 2.59 ns，与基线一致）。
+      **修正的过时数据**：`NSNotificationCenter` 现在是 **3 个 ivar**（`_impl` + `actorQueueManagerLock`
+      + `_actorQueueManager`），不是旧文章/上一版初稿说的 1 个；后两个服务于 iOS 26 类型化通知。
+      `MainActorMessage` / `AsyncMessage` 定义已从本机 SDK swiftinterface 抄原文。
 - [x] 13 Method Swizzling：正确姿势、+load 时机与那些坑（Runtime 与对象通信/）—— Day 2 + Day 4，待审查
       定位：`Runtime/Part 4` 与 `Runtime/Method - Swizzling.md` 的**实证补充**，不重复原理与场景。
       **实测硬料**：
@@ -188,8 +228,29 @@ draft: true
 - [ ] 21 NSArray / NSDictionary / NSSet 的实现与选型（Foundation 与集合/）
 
 ### 第七周：编译、链接、Mach-O、dyld 与启动（编译链接与启动/）
-- [ ] 22 从源码到可执行文件：预处理 / 编译 / 汇编 / 链接四段
-- [ ] 23 Mach-O 重写：header / segment / section / 符号表与 otool 解剖
+- [x] 22 从源码到可执行文件：四个阶段与符号（seriesOrder 24，694 行）—— 已过主会话核验
+      **实测硬料**：`#import <Foundation/Foundation.h>` 单独展开 90360 行 / 4.84 MB / 647 个头文件，
+      贡献行数前三全不是 Foundation（MacErrors.h / mach/task.h / Security/cssmapi.h）。
+      modules 冷 1.9s / 热 0.93s vs 文本 4.5s。`clang -###` 只 fork 两个进程，不是"四个阶段四个程序"。
+      **死代码剥离对 ObjC 类无效**：编译器发 `no_dead_strip` + `@llvm.compiler.used` 双保险。
+      **`__objc_classrefs` 消失门槛**：ios17 有 / ios18 无，macos14 有 / macos15 无——两个维度都扫了。
+      `-fvisibility=hidden` 藏不住 ObjC 类，`NSClassFromString` 照样拿得到。
+      **link map 会骗人**：`# Dead Stripped Symbols` 里列着的方法列表，在同一份 map 的存活区里也在，
+      被剥的是绝对方法列表、链接器另建了相对方法列表顶上。只看 dead 那节会得出反的结论。
+      **主会话独立复现**：200 个死 C 函数 0 字节代价 / 200 个死 ObjC 类 +120KB 且 classlist=0x640=200×8；
+      classrefs 四个版本门槛逐条对上；静态库放最前照样链通 + `man ld` "continually search" 原文；
+      `man nm` 确实没有 `W` 这一项。四条全过。
+- [x] 23 Mach-O 重写：结构、符号绑定与 chained fixups（seriesOrder 25，802 行）—— 已过主会话核验
+      **实测硬料**：惰性绑定整套（`__stub_helper` / `__la_symbol_ptr` / `dyld_stub_binder`）在默认构建里
+      三样全无，`__stubs` 直接穿 `__DATA_CONST,__got`；加 `-Wl,-no_fixup_chains` 三样同时回来。
+      `__LINKEDIT` 九块内容首尾相接加起来 51512，和 `ls -l` 一字节不差。
+      代码签名 `hashes=13` = `ceil(50976/4096)`（签名用 4KB 页、VM 用 16KB 页）；改一字节后运行退出码 137。
+      `strip -x` 砍掉 ByteDanceKit 44% 体积，符号表+字符串表原占 `__LINKEDIT` 的 88%。
+      relative method list 门槛实测 iOS 14.0（13.0 上 100 个方法占 2408 字节，14.0 起 1208，正好省一半且免 rebase）。
+      `__DATA_CONST` 的 `initprot` 是 `rw-`，靠 `SG_READ_ONLY`(0x10) 让 dyld 事后 `mprotect`。
+      **主会话核验时抓到一条**：见第五批。
+- [~] 15b AutoreleasePool：哨兵、页链表与 RunLoop 的接缝（内存管理/，seriesOrder 18）—— 写作中
+- [~] 21 Foundation 集合：类簇、真实实现与选型（Foundation 与集合/，seriesOrder 29）—— 写作中
 - [ ] 24 静态库与动态库：符号解析、`-all_load`、重复符号与 rpath
 - [ ] 25 dyld 补章：三代 dyld、启动阶段耗时表
 - [ ] 26 App 启动：pre-main / main / 首帧，以及可测量的优化项
@@ -279,6 +340,35 @@ draft: true
 **捡到的最好素材**：`objc_loadWeakRetained` 正上方那段注释——"Once upon a time we eagerly cleared \*location... So we now don't touch the storage until deallocation completes."。我花一整节用实验证明的事，Apple 在源码里亲口解释了为什么这么设计。这类"源码注释里的设计自述"是最值钱的引用，以后每篇都该主动去翻。
 
 **顺带确认了 19 位那个数字的真实归属**：只存在于无指针认证的 arm64（A7~A11，iPhone 5s 到 iPhone X）。arm64e 真机、所有 iOS 模拟器、所有 x86_64 都是 8 位——也就是说它在 Intel Mac 上从来没成立过。
+
+第五批（Mach-O 篇，主会话核验时抓出，**这条是新类型的错**）：
+
+| agent 写的 | 实际 |
+| --- | --- |
+| "chained fixups 的切换门槛是部署目标 iOS 13.4，网上说的 iOS 15 是记混了" | **半对，而且把对的说成了错的。** 它编了八个版本，全是 `arm64-apple-ios`（真机）。我加一个 `-simulator` 重跑：13.4~14.9 全是老格式，15.0 才切。**iOS 15 正是模拟器 target 的真实阈值**，流传得广大概因为大多数人在模拟器上验。三条线：真机 13.4 / 模拟器 15.0 / macOS 12.0 |
+
+前四批的错误都是「没跑实验就下结论」。**这一条是跑了实验、数据也没错、结论仍然错**——因为它在一个维度上编了八次，另一个维度上一次都没动过。已把这条教训写进文章末尾，也补进 `_代写规范` 的证据纪律。
+
+新增规范条款：**下"网上说的不对"这种结论之前，先列一遍这个实验有哪几个自变量，检查自己是不是只扫了其中一个。**
+
+## 三点六、Mac Catalyst：UIKit 实验不再需要模拟器（2026-07-27 发现）
+
+核验对象通信篇时找到的路子，**直接改变了后面六篇 UIKit 文章的做法**。
+
+```shell
+SDK=$(xcrun --sdk macosx --show-sdk-path)
+clang -fobjc-arc -target arm64-apple-ios17.0-macabi -isysroot "$SDK" \
+      -iframework "$SDK/System/iOSSupport/System/Library/Frameworks" \
+      -framework Foundation -framework UIKit -o out prog.m && ./out
+```
+
+编出来是原生 macOS 二进制，`./out` 直接跑，但加载的是真正的 `UIKitCore`。已用它把手工解析 `class_ro_t`
+得到的 `UIGestureRecognizerTarget._target = weak` 独立复现（`class_getWeakIvarLayout` 直接返回 `01`，
+`ivarLayout` 为 null），两条互不相干的路径落到同一答案。
+
+**原计划**：六篇 UIKit 文章串行做，一次 boot 一台模拟器、做完立刻关。
+**改为**：先全部用 Catalyst 并行做，零模拟器；只有结论疑似受 AppKit 桥接层影响时才 boot 一台复核，
+复核完立刻关。适用范围与边界已写进 `_代写规范` 第二节。
 
 ## 三点七、剩余 28 篇的并行安排（2026-07-27 起）
 
