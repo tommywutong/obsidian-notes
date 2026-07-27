@@ -200,13 +200,39 @@ Mach-O 主要解释启动时已经存在的代码和全局数据，但程序运�
 
 这就是我们经常提到的五大分区
 
-![Snapzy_2026-07-25_00-30-24_668.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/Snapzy_2026-07-25_00-30-24_668.png)
+![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260727183544537.png)
 
-- **代码区**：存放编译后的机器指令。在 iOS 中，主程序代码通常来自 Mach-O 的可执行映射。
-- **常量区**：用于概括字符串字面量、部分只读常量等内容。真实情况下，它们可能分布在多个只读 Section 中，并不一定组成一个连续区域。
-- **全局/静态区**：存放具有静态存储期的全局变量和静态变量。已初始化数据与零填充数据通常进入不同的 Mach-O Section。
-- **堆区**：承接运行时动态分配的数据，例如普通 Objective-C 对象和 `malloc` 返回的缓冲区。ARC 管理 Objective-C 对象的所有权，但 `malloc` 取得的内存仍需要与 `free` 配对。
-- **栈区**：每个线程都有自己的线程栈，用于支撑函数调用和临时状态。Debug、未优化时，部分局部变量可以在栈中观察到；优化后也可能进入寄存器。
+
+在[星期五系列问答 （个人译文）](https://www.tommywutong.cn/resources/mike-ash-friday-qa/02-memory-management/2010-01-15-stack-and-heap-objects-in-objective-c/)中，作者提到过栈和堆的概念
+
+栈（Stack）
+栈是内存中的一块区域，用于存储局部变量以及内部临时值和管理信息。在现代系统中，每个执行线程拥有独立的栈。当函数被调用时，栈帧（stack frame）会被压入栈中，函数局部数据即存储于此。当函数返回时，其栈帧将被销毁。这一切都自动发生，程序员无需采取任何显式操作，只需调用函数即可。
+
+![Snapzy_2026-07-27_18-38-30_502.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/Snapzy_2026-07-27_18-38-30_502.png)
+
+
+**堆**  
+- 堆是`向高地址扩展`的数据结构
+- 堆是`不连续的内存区域`，类似于`链表结构`（便于增删，不便于查询），遵循`先进先出`（FIFO）原则
+- 堆区的分配一般是在`运行时分配`
+内存可以在堆中随时分配，也可以随时销毁。你必须显式地从堆中请求分配内存；如果不使用垃圾回收机制，还需要显式地释放它。这里用于存储那些生命周期需要超越当前函数调用的数据。当你调用 `malloc` 和 `free` 时，操作的正是堆内存。
+
+关于栈对象和堆对象的一些其他细节，可以参考[这篇文章](https://www.tommywutong.cn/resources/mike-ash-friday-qa/02-memory-management/2010-01-15-stack-and-heap-objects-in-objective-c/)
+
+**代码区**
+存放编译后的机器指令。在 iOS 中，主程序代码通常来自 Mach-O 的可执行映射。
+
+**常量区**
+常量区是`编译时分配`的内存空间，在`程序结束后由系统释放`。用于概括字符串字面量、部分只读常量等内容。真实情况下，它们可能分布在多个只读 Section 中，并不一定组成一个连续区域。
+
+**全局/静态区**
+
+存放具有静态存储期的全局变量和静态变量，是编译时分配的内存空间。已初始化数据与零填充数据通常进入不同的 Mach-O Section。
+- `未初始化`的`全局变量`和`静态变量`，即BSS区（.bss）
+- `已初始化`的`全局变量`和`静态变量`，即数据区（.data）
+
+其中，全局变量是指变量值可以在运行时被动态修改，而静态变量是static修饰的变量，包含静态局部变量和静态全局变量
+
 
 
 “五大分区”是更多是一份用户分类，不包括进程中的所有真实映射。Framework、dyld shared cache、`mmap` 文件和 Guard Page 等内容，后文统一用 VM Region 解释。
@@ -679,4 +705,5 @@ flowchart TB
 - [Mike Ash — Intro to the Objective-C Runtime](https://www.mikeash.com/pyblog/friday-qa-2009-03-13-intro-to-the-objective-c-runtime.html)
 - https://juejin.cn/post/6844903902169710600?searchId=202607242005413F8E66D396B122E9CEF3
 - https://www.xta0.me/2012/07/10/iOS-Memory-1.html
+- https://www.tommywutong.cn/resources/mike-ash-friday-qa/02-memory-management/2010-01-15-stack-and-heap-objects-in-objective-c/
 - 本地：[[20 专题笔记/编译链接与启动/Mach-O|Mach-O]]
