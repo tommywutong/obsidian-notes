@@ -203,8 +203,6 @@ Mach-O 主要解释启动时已经存在的代码和全局数据，但程序运�
 ![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260727183544537.png)
 
 
-在[星期五系列问答 （个人译文）](https://www.tommywutong.cn/resources/mike-ash-friday-qa/02-memory-management/2010-01-15-stack-and-heap-objects-in-objective-c/)中，作者提到过栈和堆的概念
-
 栈（Stack）
 栈是内存中的一块区域，用于存储局部变量以及内部临时值和管理信息。在现代系统中，每个执行线程拥有独立的栈。当函数被调用时，栈帧（stack frame）会被压入栈中，函数局部数据即存储于此。当函数返回时，其栈帧将被销毁。这一切都自动发生，程序员无需采取任何显式操作，只需调用函数即可。
 
@@ -213,7 +211,16 @@ Mach-O 主要解释启动时已经存在的代码和全局数据，但程序运�
 函数栈也称为栈，和上文是一个东西。
 我们首先理解一下"栈帧"（Stack Frame）这个概念。每次函数调用发生时，程序会在栈顶新建一个栈帧，里面通常包含以下几类信息：一是返回地址，也就是函数执行完后应该跳回到调用者代码的哪一行继续执行；二是函数的参数，调用时传入的实参会被复制或引用到这个栈帧里；三是局部变量，函数体内声明的变量在栈帧中分配空间，函数结束后这些变量随栈帧一起销毁；四是保存的寄存器状态，比如调用前某些寄存器的值需要在返回后恢复，也会被暂存在栈帧中。
 
+![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260727201729938.png)
+
+怎么这么像微机8086呢（bushi）
+
+![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260727201756951.png)
+
+
 这种设计非常巧妙，因为它天然支持了函数的递归调用——每一层递归都会产生一个独立的栈帧，各自拥有独立的局部变量副本,互不干扰,直到最内层递归返回时,栈帧才逐层弹出。
+
+栈溢出简单来说就是，如果递归函数嵌套太深或递归深度过大，栈帧（Stack Frame）不断累积，就会耗尽这块内存空间，产生栈溢出，程序因此崩溃
 
 ![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260727195521956.png)
 
