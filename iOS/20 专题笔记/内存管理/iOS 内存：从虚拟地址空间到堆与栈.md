@@ -298,6 +298,40 @@ void RunSimpleMemoryTest(void) {
 
 >五大分区是一种用途分类，但这些区域并不是在同一时刻、通过同一种方式产生的。代码、常量和全局/静态数据主要由 Mach-O 在 App 启动时带入虚拟地址空间；堆与线程栈则在 App 运行过程中由内存分配器和线程系统建立。下面分别分析这两条形成路径。
 
+### 顺带说清楚 `static`
+
+上面代码里的 `staticNumber` 只是文件作用域的 `static`。`static` 关键字在 C/Objective-C 里其实控制两件不同的事，容易被"是不是进静态区"这一个问题混在一起：
+
+| 位置 | `static` 改变的是什么 | 是否改变存储位置 |
+| --- | --- | --- |
+| 文件作用域（如 `staticNumber`） | 链接可见性：从 external linkage 变成 internal linkage，即这个符号不再能被其他编译单元引用 | 不改变。它本来就具有静态存储期，`static` 只是让它变成"文件私有" |
+| 函数局部（如 `static int count`） | 存储期：从自动存储期（automatic storage duration）变成静态存储期（static storage duration） | 改变。变量从栈迁移到全局/静态数据区，且只在第一次执行到声明处时初始化一次，之后跨函数调用保留上次的值 |
+
+第一种不会改变内存布局，纯粹是编译期的可见性开关；第二种才是真正会把变量"搬家"的用法，也是实际开发中更常被问到的点。用一段实验代码把第二种行为坐实：
+
+```objc
+__attribute__((noinline, optnone))
+void RunStaticCallCountTest(void) {
+    static int staticCallCount = 0;
+    int localCallCount = 0;
+    staticCallCount++;
+    localCallCount++;
+
+    NSLog(@"staticCallCount 地址 = %p，值 = %d", &staticCallCount, staticCallCount);
+    NSLog(@"localCallCount 地址 = %p，值 = %d", &localCallCount, localCallCount);
+}
+```
+
+连续调用两次 `RunStaticCallCountTest()`，在 iOS 模拟器（iPhone 16 Pro，iOS 26.5，Xcode 26.6，Debug，`-O0`）上实测：
+
+| 调用次数 | `staticCallCount` 地址 | `staticCallCount` 值 | `localCallCount` 地址 | `localCallCount` 值 |
+| --- | --- | --- | --- | --- |
+| 第 1 次 | `0x1043a4960` | 1 | `0x16ba634a4` | 1 |
+| 第 2 次 | `0x1043a4960` | 2 | `0x16ba634a4` | 1 |
+
+用 `memory region` 查询 `0x1043a4960` 落在 `0x1043a4000–0x1043a8000 rw-`，与该次运行中 `globalNumber`／`staticNumber` 所在的可写数据 Region 是同一块——证明函数局部 `static` 变量确实迁移到了全局/静态数据区，不在栈里。两次调用中它的地址不变、值从 1 累加到 2，跨调用保留了状态。
+
+`localCallCount` 的地址在这两次调用之间也没变，这是本次模拟器 Debug 构建复用了同一段栈帧的结果，不代表栈变量本身具有跨调用保留状态的能力；它的值每次都重新是 1，说明栈上的存储在每次调用时都被重新初始化，与 `staticCallCount` 的行为形成对照。
 
 ##  Mach-O
 Mach-O是 iOS 可执行文件的组织格式，用来解释 App 启动前代码和全局数据保存在什么地方，以及启动后如何被映射进虚拟地址空间。
