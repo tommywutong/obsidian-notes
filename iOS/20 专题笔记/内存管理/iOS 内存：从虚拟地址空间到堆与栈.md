@@ -274,9 +274,6 @@ void RunSimpleMemoryTest(void) {
     free(buffer);
 }
 ```
-
-可以在 `viewDidLoad` 中调用：
-
 ```objc
 - (void)viewDidLoad {
     [super viewDidLoad];
