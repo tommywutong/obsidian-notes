@@ -210,6 +210,9 @@ Mach-O 主要解释启动时已经存在的代码和全局数据，但程序运�
 
 ![Snapzy_2026-07-27_18-38-30_502.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/Snapzy_2026-07-27_18-38-30_502.png)
 
+函数栈也称为栈 
+
+
 
 **堆**  
 - 堆是`向高地址扩展`的数据结构
