@@ -285,7 +285,7 @@ MRC 下成立。ARC 下 `__block id` 默认是 `STRONG` layout，断不了；但
 
 `weakSelf` 和 `strongSelf` 解决的是两个不同的问题：前者断开永久持有，后者保证单次执行期间对象不消失。实测同一个 block 里两次读 weak 变量能读到 `A` 和 `null`，这就是后者存在的理由；而 `strongSelf` 是局部变量、执行完即释放，所以不会造成新的环。代价是最后那次释放可能发生在后台线程上。
 
-下一篇进入第三周：[[iOS Runtime 应用：Method Swizzling 与 KVO 的实现]]。
+下一篇进入第三周：[[iOS Method Swizzling：正确姿势、+load 时机与那些坑]]。
 
 ## 参考资料
 

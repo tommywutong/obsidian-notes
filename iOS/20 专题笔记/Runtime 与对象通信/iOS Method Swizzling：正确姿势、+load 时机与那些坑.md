@@ -17,7 +17,7 @@ draft: true
 
 这篇有个前提要先说清楚。
 
-Swizzling 的原理和常规写法，我自己已经写过两遍了。[[Runtime/Swizzling]] 那篇整理了四种写法：裸的 `method_exchangeImplementations`、`+load` + `dispatch_once` + `class_addMethod` 的标准模板、保存原 IMP 的函数指针式、以及 AFNetworking 遍历继承链探测类簇真实类的写法。[[Runtime/应用篇]] 第 3 节把同一套东西接回消息发送机制，多讲了 `_cmd` 被篡改的后果、类簇的坑和五类典型应用场景，第 6 节还讲了 `NSProxy` 和 Aspects 风格两种 AOP 的分野。这两篇里的结论我基本都还认，不重复。
+Swizzling 的原理和常规写法，我自己已经写过两遍了。[[Runtime/Method - Swizzling]] 那篇整理了四种写法：裸的 `method_exchangeImplementations`、`+load` + `dispatch_once` + `class_addMethod` 的标准模板、保存原 IMP 的函数指针式、以及 AFNetworking 遍历继承链探测类簇真实类的写法。[[Runtime/Part 4 - Runtime 应用篇]] 第 3 节把同一套东西接回消息发送机制，多讲了 `_cmd` 被篡改的后果、类簇的坑和五类典型应用场景，第 6 节还讲了 `NSProxy` 和 Aspects 风格两种 AOP 的分野。这两篇里的结论我基本都还认，不重复。
 
 问题是那两篇里没有一行是跑出来的。全是"会污染父类方法表"、"应该在 `+load` 里做"、"要用 `dispatch_once`"这类断言。这次我把它们逐条搬到模拟器上跑，跑出来五个结果和我原来写的不一样：
 
@@ -629,7 +629,7 @@ dispatch_async(dispatch_get_global_queue(0, 0), ^{
 
 ## 五、`+initialize` 为什么不能拿来 swizzle
 
-我在 [[Runtime/应用篇]] 里给的理由是"可能永远不被调用"，在 [[Runtime/Swizzling]] 里写的是"可能被子类覆盖导致多次执行"。前者没错但不是最致命的，后者的措辞是错的：出问题的时候子类恰恰什么都没覆盖。
+我在 [[Runtime/Part 4 - Runtime 应用篇]] 里给的理由是"可能永远不被调用"，在 [[Runtime/Method - Swizzling]] 里写的是"可能被子类覆盖导致多次执行"。前者没错但不是最致命的，后者的措辞是错的：出问题的时候子类恰恰什么都没覆盖。
 
 ```objc
 @implementation KP
@@ -858,7 +858,7 @@ Sub  = 0x104f881d0   object_getClass(Sub) = 0x104f881a8 (Sub)
 class_isMetaClass(Sub)=0  class_isMetaClass(meta)=1
 ```
 
-`class_getName` 两边都返回 `Sub`，地址差 40 个字节。日志里打类名根本区分不出你操作的是类还是元类，只有 `class_isMetaClass` 能。类与元类的结构见 [[Runtime/对象与类的本质]]。
+`class_getName` 两边都返回 `Sub`，地址差 40 个字节。日志里打类名根本区分不出你操作的是类还是元类，只有 `class_isMetaClass` 能。类与元类的结构见 [[Runtime/Part 1 - 对象与类的本质]]。
 
 而 `class_addMethod` 返回 `YES` 在这里是个假信号。它回答的永远是"这个类自己有没有这个 selector"，第一节就说过；它不会替你检查"这个 selector 是不是该在这一层"。
 
@@ -942,7 +942,7 @@ class PureSwift {                    // 不继承 NSObject
 
 `class_getInstanceMethod` 返回 `NULL`，`class_getMethodImplementation` 返回的却是 `_objc_msgForward`。这就是"找不到方法就走转发"在方法表这一层的样子。Aspects 那类库把它反过来用：主动把一个存在的方法的 IMP 设成 `_objc_msgForward`，让本来能走通的调用掉进完整转发。
 
-[[Runtime/应用篇]] 第 6.2 节给了伪代码，这里补一份能跑的最小版：
+[[Runtime/Part 4 - Runtime 应用篇]] 第 6.2 节给了伪代码，这里补一份能跑的最小版：
 
 ```objc
 + (void)install {
@@ -996,13 +996,13 @@ _objc_msgForward_stret(void /* id receiver, SEL sel, ... */ )
 
 `OBJC_ARM64_UNAVAILABLE` 在 `objc-api.h` 里展开成 `OBJC_UNAVAILABLE("not available in arm64")`。`objc_msgSend_stret` 和 `objc_msgSendSuper_stret` 同样标了它。iOS 从 iPhone 5s 起全是 arm64，所以老文章里那一整段关于 stret 的讨论，对今天的 iOS 已经没有对象了。
 
-最后诚实一点：上面这个最小版仍然有 `_cmd` 问题。`inv.selector` 换成别名再 invoke，原实现看到的 `_cmd` 是别名。这和 [[Runtime/应用篇]] 里分析的方式 A 是同一个毛病，转发式并不自动解决它，只是把它挪到了一个你能看见的地方。
+最后诚实一点：上面这个最小版仍然有 `_cmd` 问题。`inv.selector` 换成别名再 invoke，原实现看到的 `_cmd` 是别名。这和 [[Runtime/Part 4 - Runtime 应用篇]] 里分析的方式 A 是同一个毛病，转发式并不自动解决它，只是把它挪到了一个你能看见的地方。
 
 ## 十一、几个我不同意的说法
 
 - "用了 `class_addMethod` 模板就安全了。" 第二节整节都在反驳这句。目标方法是继承来的时候，模板把父类当时的 IMP 冻成了裸指针，父类后 swizzle 就断链。
 - "category 的 `+load` 顺序由编译顺序决定。" 现在还得加一句前置条件：类和 category 在同一个二进制里时，链接器默认会把 category 合并进类，那个 `+load` 就变成类的 `+load`，走的是父类优先规则。`-Wl,-no_objc_category_merging` 可以关掉。
-- "`+initialize` 不适合 swizzle，因为可能永远不被调用。" 说反了重点。它更常见的问题是被调用多次：每个没有实现 `+initialize` 的子类都会把父类那份再触发一遍，两次交换正好抵消。这里也纠正我自己在 [[Runtime/Swizzling]] 里写的"可能被子类覆盖导致多次执行"：真正触发多次的原因恰恰是子类没有覆盖。
+- "`+initialize` 不适合 swizzle，因为可能永远不被调用。" 说反了重点。它更常见的问题是被调用多次：每个没有实现 `+initialize` 的子类都会把父类那份再触发一遍，两次交换正好抵消。这里也纠正我自己在 [[Runtime/Method - Swizzling]] 里写的"可能被子类覆盖导致多次执行"：真正触发多次的原因恰恰是子类没有覆盖。
 - "`+load` 里必须包 `dispatch_once`。" 运行时本来就只调一次。`dispatch_once` 只能拦住手写的 `[super load]` / `[Cls load]`，拦不住"同一份代码被链进两个二进制各带一个 token"这种真实场景。
 - "`+load` 里不能访问其他类。" 类是可以正常发消息的，`_read_images` 阶段就 realize 好了。不能依赖的是别的类的 `+load` 副作用，也不能在里面同步等任何跟镜像加载沾边的东西。
 - "Swift 里加了 `@objc` 就能 swizzle。" 方法会出现在方法列表里，替换也会成功，但 Swift 侧的调用点仍然是直派，看不到 hook。要 `dynamic`。
@@ -1038,11 +1038,11 @@ Swift 侧只有 `@objc dynamic` 是完整可 swizzle 的。`@objc` 单独用会�
 
 ### 本地
 
-- [[Runtime/Swizzling]]：四种写法的完整代码，包括 AFNetworking 那套类簇探测
-- [[Runtime/应用篇]]：`_cmd` 被篡改的后果、五类应用场景、`NSProxy` 与 Aspects 两种 AOP
-- [[Runtime/消息发送与转发]]：`objc_msgSend` 的查找流程，本文所有"改的是 SEL→IMP 映射"的说法都建立在这上面
-- [[Runtime/Category：加载、覆盖与关联对象]]：category 附加时机与方法覆盖规则
-- [[Runtime/对象与类的本质]]：类与元类的结构，第八节那个"打在类上还是元类上"的背景
+- [[Runtime/Method - Swizzling]]：四种写法的完整代码，包括 AFNetworking 那套类簇探测
+- [[Runtime/Part 4 - Runtime 应用篇]]：`_cmd` 被篡改的后果、五类应用场景、`NSProxy` 与 Aspects 两种 AOP
+- [[Runtime/Part 2 - 消息发送与转发]]：`objc_msgSend` 的查找流程，本文所有"改的是 SEL→IMP 映射"的说法都建立在这上面
+- [[Runtime/Part 3 - Category：加载、覆盖与关联对象]]：category 附加时机与方法覆盖规则
+- [[Runtime/Part 1 - 对象与类的本质]]：类与元类的结构，第八节那个"打在类上还是元类上"的背景
 - [[dyld]]：`_objc_init` 注册回调到 `notifyObjCInit` 再到 `load_images` 的完整链路
 - [[iOS KVC 与 KVO：搜索顺序、isa-swizzling 与手动触发]]：isa-swizzling 是另一条路，改对象的类而不是类的方法表
 

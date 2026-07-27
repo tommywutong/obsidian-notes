@@ -464,7 +464,17 @@ objc_getAssociatedObject(t2) = 来自 t1  ← 从没给 t2 设过
 objc_getAssociatedObject(h1) = 来自 h1
 ```
 
-设得进、读得回、不崩溃。问题有两个。一是相同值共享同一个位模式，两个"不同"的 `@(42)` 会读到同一份关联——上面 `t2` 从没设过却读出了 `t1` 的值。二是关联表只在 `objc_destructInstance` 里通过 `_object_remove_associations` 清理，而 tagged pointer 永远不 dealloc，挂上去的东西会一直留到进程结束。第二条比第一条危险，因为它不表现为逻辑错误，只表现为内存慢慢涨。
+设得进、读得回、不崩溃。问题有两个。一是相同值共享同一个实例，两个"不同"的小整数会读到同一份关联——上面 `t2` 从没设过却读出了 `t1` 的值。二是关联表只在 `objc_destructInstance` 里通过 `_object_remove_associations` 清理，而 tagged pointer 永远不 dealloc，挂上去的东西会一直留到进程结束。第二条比第一条危险，因为它不表现为逻辑错误，只表现为内存慢慢涨。
+
+这里有个坑我自己踩过，写下来提醒后来人：**这组实验不能用 `@(42)` 这种字面量来造 tagged pointer。**前面第四节刚讲过，`@42` 和 `@(42)` 在 Xcode 13 之后都被折叠成 `NSConstantIntegerNumber`，bit63 是 0，压根不是 tagged。用它跑出来的"同值共享"看着结论一样，机制却是另一回事——常量对象共享是因为编译器只发了一份，tagged pointer 共享是因为值直接编在指针位里。要真的拿到 tagged pointer，装箱的值必须来自运行期：
+
+```objc
+int rt = 42;
+id fromLiteral = @(42);     // NSConstantIntegerNumber，bit63 = 0
+id fromRuntime = @(rt);     // __NSCFNumber，bit63 = 1，这才是 tagged
+```
+
+上面那组关联对象的输出用的是运行期值。同一篇文章里两处结论建立在同一个字面量上却指向不同机制，是很容易出的错。
 
 **弱引用。** 可以声明 `__weak` 指向 tagged pointer，运行时在 `weak_register_no_lock` 开头就短路了（`_objc_isTaggedPointerOrNil` 判断），根本不写进弱引用表。因为它永远不会被销毁，弱引用也就永远不会被置 `nil`。实测 `weak 指向 tagged: 42`，对象"释放"后依然是 42。这不崩溃，但如果逻辑依赖"对象销毁后 weak 变 nil"，在小整数上就会失效。
 

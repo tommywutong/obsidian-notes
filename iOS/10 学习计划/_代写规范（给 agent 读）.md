@@ -56,7 +56,13 @@ clang -fobjc-arc -target arm64-apple-ios17.0-macabi -isysroot "$SDK" \
 
 适合 Catalyst 的：UIKit 私有类的结构与 ivar 语义、`UIView` / `CALayer` 的树结构和 `frame`/`bounds`/`transform` 换算、`hitTest:` 与响应者链的算法、`UIViewController` 的生命周期回调顺序、`UITableView` 的复用与代理调用顺序。这些都是 UIKitCore 里同一份代码。
 
-不适合 Catalyst 的：触摸事件的真实输入路径、屏幕 scale 与安全区、iOS 专属的系统行为、任何和 AppKit 桥接层相关的表现。**凡是结论可能受 Catalyst 桥接影响的，要么标注"Catalyst 上实测，未在 iOS 复核"，要么按下面的纪律开一台模拟器复核一次。**
+**需要真 `UIWindow` 时**：直接 `[[UIWindow alloc] init]` 会抛 `NSApplication has not been created yet`。做一个最小 `.app` bundle 绕过——写个 `Info.plist`（`CFBundleExecutable` / `CFBundleIdentifier` / `CFBundlePackageType=APPL`），`codesign -s -` 签一下，再用 `UIApplicationMain` 起进程，就能拿到真 window。`convertPoint:toView:nil` 这类依赖 window 的语义因此可以实测而不是推测。
+
+**已知在 Catalyst 上不可信的具体项**：`layer.contentsScale` 实测是 1.00，而同一进程里 `screen.scale` 和 `traitCollection.displayScale` 都是 2.00；`UIScreen.mainScreen.bounds` 返回的是 Mac 显示器尺寸（同一台机器两次运行可能是 960×600 和 1920×1080）。**任何依赖屏幕尺寸或 scale 的数字都不要写进正文。**
+
+不适合 Catalyst 的：触摸事件的真实输入路径、屏幕 scale 与安全区、iOS 专属的系统行为、任何和 AppKit 桥接层相关的表现。
+
+**另外：绝对不要用 `CGEvent` 合成鼠标/键盘事件来"制造"触摸。** 它是系统级的，会真的移动用户光标、真的按下鼠标，落点不保证在你的窗口里，还会弹辅助功能授权框。要验命中测试就直接调 `[view hitTest:point withEvent:nil]`（`event` 传 nil 完全合法），要验滚动就直接改 `contentOffset`。构造不出真实 `UITouch` 的实验，如实写做不了。**凡是结论可能受 Catalyst 桥接影响的，要么标注"Catalyst 上实测，未在 iOS 复核"，要么按下面的纪律开一台模拟器复核一次。**
 
 注意：直接 `dlopen` `/System/iOSSupport/.../UIKitCore` 会报 `wrong platform to load into process`，必须整个二进制编成 macabi target。
 
