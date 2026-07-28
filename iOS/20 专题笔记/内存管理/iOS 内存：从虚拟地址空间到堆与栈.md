@@ -516,7 +516,6 @@ Wired memory pages are not immediately moved back to the free list when they bec
 
 
 在 **OS X** 中，如果一个非活跃页面含有被修改过的数据，必须先把它写到后备存储，才能放入 Free List。
-
 在 **iOS** 中，被修改过但非活跃的页面**必须留在内存里**，由拥有它的 App 自己负责清理——这就是为什么 iOS 会发送内存警告，要求 App 主动释放。
 
 
