@@ -463,11 +463,7 @@ memory region 0x实际地址
 - **`&object` 三次保持不变**：它表示局部指针变量 `object` 自己的地址。在本次 Debug 实验中，它通常位于当前线程栈。
 - **`object` 三次保存不同的值**：它表示 `object` 当前保存的对象地址，三次分别指向三个仍然存活的普通对象。
 - **两类地址所在 Region 不同**：`&object` 通常落在栈 Region；`object` 通常落在分配器管理的可写 Region。
-
-#### iPhone 15 真机结果
-
-2026 年 7 月 28 日在已连接的 iPhone 15 上运行 `MemoryMapLab`，环境与采集方式如下：
-App 启动时连续调用两次实验函数，得到：
+已连接的 iPhone 15 上运行 `MemoryMapLab`，App 启动时连续调用两次实验函数，得到：
 
 | 调用 | `&object` 与 Region | 第 1 个对象 | 第 2 个对象 | 第 3 个对象 | 三个对象所在 Region |
 | --- | --- | --- | --- | --- | --- |
