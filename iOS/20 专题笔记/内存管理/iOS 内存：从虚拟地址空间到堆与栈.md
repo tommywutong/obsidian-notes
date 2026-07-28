@@ -485,7 +485,244 @@ memory region 0x实际地址
 2. **字符串字面量**：`@"Hello"` 通常落在主程序的只读映射内，并不是函数每执行一次就在堆上创建一个新字符串对象。
 3. **Tagged Pointer**：部分小型 `NSNumber`、`NSDate`、`NSString` 等值可能直接编码在指针中，并不对应普通堆对象。它属于第二轮实验，本次基础代码暂不加入。
 
-因此，面试中回答"对象在哪里"时，至少需要先确认讨论的是普通动态对象、字面量对象，还是 Tagged Pointer；回答"变量在哪里"时，还要区分变量本身和变量保存的值。
+因此，回答"对象在哪里"时，至少需要先确认讨论的是普通动态对象、字面量对象，还是 Tagged Pointer；回答"变量在哪里"时，还要区分变量本身和变量保存的值。
+
+### 从“指针变量与对象本体”继续追问的面试题
+
+“指针变量不等于对象本体”不只用于回答对象位于哪里。对象传参、属性访问、ARC、相等性和对象大小等问题，都依赖同一张关系图：
+
+```text
+指针变量自己的地址：&object
+        ↓ 这个位置中保存了一个值
+指针变量保存的值：object
+        ↓ 普通情况下把它解释成对象地址
+对象本体：该地址处由运行时和分配器管理的内存
+```
+
+下面按理解顺序梳理常见追问。
+
+#### 问题一：给方法传入对象，传的是对象还是指针？
+
+```objc
+static void ReplaceObject(NSObject *object) {
+    object = [[NSObject alloc] init];
+}
+
+NSObject *original = [[NSObject alloc] init];
+ReplaceObject(original);
+```
+
+调用 `ReplaceObject(original)` 时，复制的是 `original` 保存的对象地址，不是复制整个对象
+函数内部重新执行 `object = ...`，只改变参数这个局部指针变量保存的值，不会修改调用方的 `original`。
+
+> **面试回答**：Objective-C 方法传递对象时，参数接收的是对象指针值的一份副本。给参数重新赋值只改变参数自己的指向，不会修改调用方的指针变量。
+
+#### 问题二：修改指针与修改对象有什么区别？
+
+```objc
+static void ChangePointer(NSMutableString *string) {
+    string = [NSMutableString stringWithString:@"new"];
+}
+
+static void ChangeObject(NSMutableString *string) {
+    [string appendString:@"!"];
+}
+```
+
+两段代码做的不是同一件事：
+
+```text
+string = anotherString
+→ 修改局部指针变量保存的地址
+→ 让它改为指向另一个对象
+
+[string appendString:@"!"]
+→ 读取 string 保存的地址
+→ 找到双方共同指向的对象
+→ 修改该对象的内部状态
+```
+
+因此，`ChangePointer` 不会把调用方的指针改成新字符串；`ChangeObject` 则可能让调用方观察到同一个可变字符串对象已经发生变化。
+
+> **面试回答**：重新赋值改变的是指针的指向；向对象发送修改消息，改变的是该指针所指向对象的状态。
+
+#### 问题三：为什么 `NSError **` 可以修改调用方的指针？
+
+```objc
+NSError *error = nil;
+BOOL success = [manager loadData:&error];
+```
+
+这里传入的不是 `error`，而是 `&error`：
+
+```text
+error   的类型：NSError *
+error   的含义：保存 NSError 对象的地址
+
+&error  的类型：NSError **
+&error  的含义：指针变量 error 自己的地址
+```
+
+普通 `NSError *` 参数只能得到对象地址的一份副本；`NSError **` 参数拿到了调用方指针变量所在的位置，因此被调用方可以把一个新的错误对象地址写回 `error`。在 ARC 下，Cocoa 常见的错误返回参数还涉及 `__autoreleasing` 推断，具体所有权规则放到 ARC 专题继续讨论。
+
+> **面试回答**：调用时传入 `&error`，相当于把调用方指针变量自己的地址交给方法，所以方法能够修改该指针变量保存的对象地址。
+
+#### 问题四：`self.name`、`_name` 和局部变量 `name` 是一回事吗？
+
+```objc
+@interface Person : NSObject
+@property (nonatomic, copy) NSString *name;
+@end
+
+- (void)test {
+    NSString *name = @"Tommy";
+    self.name = name;
+}
+```
+
+三者处于不同层级：
+
+```text
+name
+→ 当前函数中的局部指针变量
+→ Debug、未优化实验中通常位于栈
+
+_name
+→ Person 对象内部的实例变量
+→ 它的存储跟随 Person 对象本体
+→ 它保存的仍然是 NSString 对象地址
+
+self.name
+→ 属性访问表达式
+→ 赋值时通常调用 setName:
+→ 读取时通常调用 name
+```
+
+`property` 本身不是一个新的“内存分区”。自动合成属性时，真正提供存储的是实例变量 `_name`；而 `_name` 也没有把整个字符串对象嵌入 `Person`，它通常只是保存另一个对象的地址。
+
+> **面试回答**：局部 `name` 是函数内的指针变量，`_name` 是 `Person` 对象内部的实例变量，`self.name` 通常表示一次 getter 或 setter 调用。
+
+#### 问题五：`strong` 和 `weak` 决定变量在栈还是堆吗？
+
+不决定。
+
+```objc
+__strong NSObject *strongObject;
+__weak NSObject *weakObject;
+```
+
+`strong` 和 `weak` 描述的是引用与对象之间的所有权关系：
+
+- `strong` 引用会维持所指对象的生命周期；
+- `weak` 引用不会延长对象生命周期；对象销毁后，weak 引用会被置为 `nil`。
+
+栈、寄存器和对象内部实例变量讨论的是“这个指针变量存在哪里”；`strong`、`weak` 讨论的是“这条引用是否拥有对象”。一个局部 strong 指针仍可能在栈或寄存器中，一个对象内部的 weak 实例变量则跟随对象本体。
+
+> **错误回答**：strong 在堆上，weak 在栈上。  
+> **正确回答**：strong/weak 决定所有权语义，不决定指针变量的内存分区。
+
+#### 问题六：执行 `object = nil`，对象会马上销毁吗？
+
+不一定。
+```objc
+NSObject *first = [[NSObject alloc] init];
+NSObject *second = first;
+
+first = nil;
+```
+这里直接发生的是：指针变量 `first` 不再保存原对象地址，并解除由 `first` 建立的那一条 strong 引用。但 `second` 仍然指向并强引用原对象，因此对象可以继续存活。
+
+```text
+first = nil
+→ first 不再指向原对象
+→ 不等于把对象所在内存直接“擦掉”
+
+对象是否销毁
+→ 取决于是否还存在其他 strong 引用
+```
+
+> **面试回答**：把 strong 指针设为 `nil` 只解除这一条强引用；只有最后一条强引用消失后，对象才具备结束生命周期的条件。
+
+
+#### 问题七： `==` 和 `isEqual:` 比较的是什么？
+
+```objc
+NSString *first = [NSString stringWithFormat:@"Tommy"];
+NSString *second = [NSString stringWithFormat:@"Tommy"];
+
+BOOL samePointer = (first == second);
+BOOL equalValue = [first isEqual:second];
+```
+
+对于对象指针：
+
+```text
+first == second
+→ 比较两个指针变量保存的地址
+→ 判断是否指向同一个对象
+
+[first isEqual:second]
+→ 询问对象定义的逻辑相等关系
+→ 判断两者表示的值是否相等
+```
+
+不同类可以按照自身语义实现 `isEqual:`。如果自定义类重写 `isEqual:` 并准备把对象放进 `NSSet`、`NSDictionary` 等哈希集合，还必须维持下面的契约：
+
+```text
+[a isEqual:b] == YES
+        ↓
+a.hash == b.hash
+```
+
+> **面试回答**：`==` 比较对象身份，也就是指针地址；`isEqual:` 比较类所定义的逻辑相等性。
+
+#### 问题八：`sizeof(object)` 得到的是对象大小吗？
+
+```objc
+NSObject *object = [[NSObject alloc] init];
+NSLog(@"%zu", sizeof(object));
+```
+
+在当前 64 位 iPhone 上，`sizeof(object)` 通常得到 `8`，因为它测量的是对象指针的宽度，不是 `NSObject` 对象本体或分配器实际分配块的大小。
+
+需要区分三个问题：
+```text
+sizeof(object)
+→ 指针变量占多少字节
+
+class_getInstanceSize([object class])
+→ 该类的实例布局至少需要多少字节
+
+malloc_size((__bridge const void *)object)
+→ 分配器为这个普通堆对象实际提供的分配块有多大
+```
+
+后两个数字也不要求相同：分配器可能按照大小等级向上取整。`malloc_size` 也不能用于 Tagged Pointer 等并不对应普通堆分配的值。
+
+> **面试回答**：`sizeof(object)` 只得到指针大小；对象实例布局与分配器实际分配大小需要分别观察。
+
+#### 继续学习的顺序
+
+这些问题可以沿同一条主线继续推进：
+
+```text
+指针变量与对象本体
+        ↓
+修改指针 vs 修改对象
+        ↓
+对象参数传递的是指针值副本
+        ↓
+NSError ** 为什么可以写回
+        ↓
+self.name、_name、局部 name
+        ↓
+strong、weak 与对象生命周期
+        ↓
+==、isEqual: 与 hash
+        ↓
+copy、集合、Block 与 Tagged Pointer
+```
+当前文章先把前八个问题作为从“地址与位置”走向“对象语义”的连接点。`copy` 与深浅拷贝、集合怎样持有对象、Block 捕获、`__block`、weak 实现和引用循环，应分别在 ARC、Block 或 Runtime 专题中展开，避免把“对象在哪里”和“对象如何被拥有”重新混成一个问题。
 
 ##  VM Region 
 
@@ -611,7 +848,6 @@ Wired memory pages are not immediately moved back to the free list when they bec
 | 线程栈 | 每个线程各自的匿名 Region | `rw-`，边界附近可有 `---` Guard | 被使用的栈页面属于进程需要负责的内存 |
 
 这一步完成了本文最重要的转换：
-
 ```text
 五大分区告诉我们"用来做什么"
         ↓
@@ -626,13 +862,13 @@ VM Region 告诉我们"系统怎样描述"
 
 本次记录的实验环境为：
 
-| 项目    | 环境                                                        |
-| ----- | --------------------------------------------------------- |
-| Xcode | 26.6                                                      |
-| 运行环境  | iPhone 16 Pro Simulator，Apple Silicon Mac（具体 iOS 版本以当次运行环境为准，不作为固定结论的依据）|
-| 构建方式  | Objective-C、Debug 信息、`-O0`                                |
-| 页面大小  | `vm_page_size = 16384`，即 16 KB                            |
-| 验证方式  | 在 `RunSimpleMemoryTest` 内设置断点，通过 LLDB 比较变量地址并查询 VM Region |
+| 项目    | 环境                                                                       |
+| ----- | ------------------------------------------------------------------------ |
+| Xcode | 26.6                                                                     |
+| 运行环境  | iPhone 16 Pro Simulator，Apple Silicon Mac（具体 iOS 版本以当次运行环境为准，不作为固定结论的依据） |
+| 构建方式  | Objective-C、Debug 信息、`-O0`                                               |
+| 页面大小  | `vm_page_size = 16384`，即 16 KB                                           |
+| 验证方式  | 在 `RunSimpleMemoryTest` 内设置断点，通过 LLDB 比较变量地址并查询 VM Region                |
 
 Simulator 与真机不完全相同，尤其是系统共享缓存、分配器实现、地址编码和内存压力行为。下面的基础步骤用于学习怎样观察地址；本节后半部分再用 iPhone 15 的两轮真机数据验证结论。无论哪种环境，都不能由一次运行推导所有 iPhone 的固定地址。
 
@@ -692,7 +928,6 @@ memory region 0x600000012340
 不要比较表中的“地址大小关系”，而要比较它们属于哪个映像、哪个 Region、具有怎样的权限。再次运行时绝对地址变化是正常现象。
 
 ### iPhone 15 真机实测
-
 为了确认 Simulator 上的结论能否在真实 iOS 环境中复现，我另外建立了一个最小 Objective-C 实验 App `MemoryMapLab`。真机环境如下：
 
 | 项目 | 环境 |
@@ -948,6 +1183,10 @@ flowchart TB
 - [Apple Kernel Programming Guide — Memory and Virtual Memory](https://developer.apple.com/library/archive/documentation/Darwin/Conceptual/KernelProgramming/vm/vm.html)
 - [Apple — Extended Virtual Addressing Entitlement](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.developer.kernel.extended-virtual-addressing)
 - [Apple Open Source XNU — arm64 VM parameters](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/mach/arm/vm_param.h)
+- [Apple — Working with Objects](https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/ProgrammingWithObjectiveC/WorkingwithObjects/WorkingwithObjects.html)
+- [Apple — Object Ownership](https://developer.apple.com/library/archive/documentation/General/Conceptual/DevPedia-CocoaCore/ObjectOwnership.html)
+- [Apple — NSObjectProtocol `isEqual:`](https://developer.apple.com/documentation/objectivec/nsobjectprotocol/1418795-isequal)
+- [Clang — Objective-C Automatic Reference Counting](https://clang.llvm.org/docs/AutomaticReferenceCounting.html)
 - [LLDB — GDB to LLDB command map](https://lldb.llvm.org/use/map.html)
 - [LLDB — Symbolication](https://lldb.llvm.org/use/symbolication.html)
 
