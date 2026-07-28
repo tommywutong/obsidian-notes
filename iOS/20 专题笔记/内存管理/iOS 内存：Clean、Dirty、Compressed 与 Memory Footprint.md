@@ -120,6 +120,7 @@ TASK_VM_INFO.phys_footprint
 3. `task_info` 读取的是进程总体 footprint，同一时刻其他运行时活动也可能产生变化；
 4. `phys_footprint` 的三次总量采样不能单独证明究竟是哪一页变 dirty，也不能直接给出 clean、dirty、compressed 各自的页数。
 
+
 所以这次实验支持的是“分配和首次触碰必须分开观察”，而不是“由一组三次采样精确归因一个页面”。如果要进一步验证每次写入影响了哪些页面，应把缓冲区按 16 KB 步长逐页写入，并结合 VM Tracker、Memgraph 或更细的 VM 统计重复对照。
 
 当 App 开始写入页面时，相关页面可能从 clean 变为 dirty。下面这张图描述的是"已分配"和"已写入"在页面状态上的区别，而不是上一篇五大分区中的新区域。
