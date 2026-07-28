@@ -401,37 +401,76 @@ object   ── 指针变量保存的值
 
 在基础实验中，`&object` 通常会和 `&localNumber` 落在同一个线程栈 Region；`object` 的值则通常落在分配器管理的可读写 Region。具体十六进制地址每次运行都可能变化，重要的是它们属于不同的地址范围。
 
-#### 补充实验：同一个指针变量被多次赋值
+### 实验：同一个指针变量依次指向三个对象
 
-上面只看了一次 `alloc`，容易让人误以为”指针变量的地址”和”它保存的值”是同一件事——毕竟只观察一次，两者的变化都没有被展示出来。补充一个实验：让同一个指针变量 `object`连续三次被重新赋值（每次都指向新 `alloc` 出来的对象），分别打印 `&object` 和 `object` 的值。
+只观察一次 `alloc`，虽然能看到 `&object` 和 `object` 是两个地址，但还不够直观。下面让同一个指针变量 `object` 依次保存三个对象的地址：
 
-以下是在 iPhone 16 Pro Simulator（iOS 26.5，Xcode 26.6，Debug，`-O0`）上实测的两次独立运行结果：
+```objc
+void RunPointerAndObjectTest(void) {
+    NSObject *firstObject = [[NSObject alloc] init];
+    NSObject *secondObject = [[NSObject alloc] init];
+    NSObject *thirdObject = [[NSObject alloc] init];
 
-```text
-指针变量多次赋值实验
-  指针变量 object 地址（应保持不变）：0x16d5d34b0
-  第 1 次 alloc 后 object 指向：0x6000000084b0  Region：0x600000000000–0x600020000000 rw-
-  第 2 次 alloc 后 object 指向：0x6000000085c0  Region：0x600000000000–0x600020000000 rw-
-  第 3 次 alloc 后 object 指向：0x6000000084b0  Region：0x600000000000–0x600020000000 rw-
+    NSObject *object = nil;
+
+    object = firstObject;
+    NSLog(@"第 1 次：&object = %p，object = %p",
+          (void *)&object, (__bridge void *)object); // 断点 1
+
+    object = secondObject;
+    NSLog(@"第 2 次：&object = %p，object = %p",
+          (void *)&object, (__bridge void *)object); // 断点 2
+
+    object = thirdObject;
+    NSLog(@"第 3 次：&object = %p，object = %p",
+          (void *)&object, (__bridge void *)object); // 断点 3
+
+    // 确保三个对象在整个实验过程中都保持存活，排除地址复用干扰。
+    NSLog(@"keep alive: %@ %@ %@", firstObject, secondObject, thirdObject);
+}
 ```
 
-```text
-指针变量多次赋值实验
-  指针变量 object 地址（应保持不变）：0x16d5d34b0
-  第 1 次 alloc 后 object 指向：0x60000000c120  Region：0x600000000000–0x600020000000 rw-
-  第 2 次 alloc 后 object 指向：0x60000000c160  Region：0x600000000000–0x600020000000 rw-
-  第 3 次 alloc 后 object 指向：0x60000000c120  Region：0x600000000000–0x600020000000 rw-
+在 `viewDidLoad` 中调用：
+
+```objc
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    RunPointerAndObjectTest();
+}
 ```
 
-可以看到：
+将工程保持在 Debug、`-O0`，在标记的三行 `NSLog` 上分别设置断点。每次暂停都执行：
 
-- **`&object` 三次都没变**——它是栈帧里那个固定的存储槽位，重新赋值只是往这个槽位里写入新的值，槽位本身的地址不会因为赋值而改变。
-- **`object` 保存的值（对象地址）每次都不同**——因为每次 `alloc` 都创建了一个新对象，指针指向的是新对象的地址。三次分配都落在同一个 Region（`0x600000000000–0x600020000000 rw-`），说明分配器把这些小对象放在了同一段匿名内存里，但具体地址不是简单的顺序递增。
-- 两次运行中都出现了第 1 次和第 3 次 alloc 拿到同一个地址（`0x6000000084b0` / `0x60000000c120`）——这不是巧合，是 ARC 在第 1 次赋值发生时立即释放了上一个对象（`retainCount` 归零），分配器随后把这块刚释放的内存重新交给了第 3 次 `alloc`。这也提示了一个容易被忽略的事实：**对象地址不是单调递增的，具体复用规则取决于分配器实现，不能作为判断对象”新旧”或分配顺序的依据。**
+```lldb
+p/x &object
+p/x object
+memory region &object
+memory region object
+```
 
-这组数据来自模拟器而非真机；模拟器的分配器实现与真机不完全一致，具体数值不能跨设备照搬，但”变量地址稳定、保存值随赋值改变”这个结构性结论不依赖设备差异。
+如果当前 LLDB 版本不能直接解析 `memory region object`，就先复制 `p/x` 输出的实际地址，再执行：
 
-这正好说明”指针变量在栈上”和”对象在堆上”可以同时成立。但这句话仍有三个边界：
+```lldb
+memory region 0x实际地址
+```
+
+把三次结果记录成下面的表格。不要照抄示例地址，以当次运行结果为准：
+
+| 暂停位置 | `&object` | `object` | `&object` 所在 Region | `object` 所在 Region |
+| --- | --- | --- | --- | --- |
+| 第 1 次赋值 | 记录实际地址 | 记录第一个对象地址 | 当前线程栈，通常为 `rw-` | 分配器管理的可写 Region |
+| 第 2 次赋值 | 应与第 1 次相同 | 应变为第二个对象地址 | 应与第 1 次相同 | 分配器管理的可写 Region |
+| 第 3 次赋值 | 应与前两次相同 | 应变为第三个对象地址 | 应与前两次相同 | 分配器管理的可写 Region |
+
+由于 `firstObject`、`secondObject`、`thirdObject` 在最后仍会被使用，三个对象在实验期间同时存活，分配器不能把同一块对象内存交给其中两个。因此这个实验应当稳定观察到：
+
+- **`&object` 三次保持不变**：它表示局部指针变量 `object` 自己的地址。在本次 Debug 实验中，它通常位于当前线程栈。
+- **`object` 三次保存不同的值**：它表示 `object` 当前保存的对象地址，三次分别指向三个仍然存活的普通对象。
+- **两类地址所在 Region 不同**：`&object` 通常落在栈 Region；`object` 通常落在分配器管理的可写 Region。
+
+还可以做一个反向实验：去掉 `firstObject`、`secondObject`、`thirdObject` 这些额外强引用，只反复执行 `object = [[NSObject alloc] init]`。旧对象生命周期结束后，分配器可能复用它的地址。但仅凭地址再次出现，不能精确证明 ARC 在哪一条指令释放了对象；它只能说明对象地址可能被复用，不能用地址大小或是否重复判断对象的新旧。
+
+这正好说明“指针变量在栈上”和“对象在堆上”可以同时成立。但这句话仍有三个边界：
 
 1. **编译器优化**：局部变量可能只存在于寄存器中，或者被完全消除，因此“局部变量一定在栈上”不严谨。
 2. **字符串字面量**：`@"Hello"` 通常落在主程序的只读映射内，并不是函数每执行一次就在堆上创建一个新字符串对象。
