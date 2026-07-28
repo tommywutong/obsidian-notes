@@ -716,7 +716,7 @@ memory region 0x600000012340
 | 项目 | 环境 |
 | --- | --- |
 | 设备 | iPhone 15（iPhone15,4，arm64e） |
-| 系统 | iOS 26.5 |
+| 系统 | iOS 26.5.2（23F84） |
 | Xcode | 26.6 |
 | 构建方式 | Objective-C、Debug、`-O0`，实验函数使用 `noinline` 与 `optnone` 保持可观察性 |
 | 页面大小 | `sysconf(_SC_PAGESIZE) = 16384`，即 16 KB |
@@ -770,6 +770,137 @@ p/x globalStringLiteral
 memory region &globalInitialized
 memory region heapBuffer
 ```
+
+### iPhone 15 真机实验：地址空间有多大，真正可用多少
+
+[Size Matters](https://alwaysprocessing.blog/2022/02/20/size-matters) 根据 2022 年公开的 XNU 源码讨论了 iOS 设备的虚拟地址空间、可用地址空间和 Extended Virtual Addressing。但文章中的设备表格、XNU 版本和“扩展到 64 GB”都是当时的结果，不能直接当作今天所有设备的固定结论。这里继续使用 `MemoryMapLab`，在当前 iPhone 15 上重新测量。
+
+实验前先分清五个容易混在一起的数字：
+
+| 数字 | 它真正表示什么 |
+| --- | --- |
+| 64 bit 指针 | 一个普通指针值的存储宽度，不代表进程能使用 \(2^{64}\) 字节 |
+| `MACH_VM_MAX_ADDRESS` | 当前 SDK 向用户空间公开的 CPU 虚拟地址上界常量，不等于当前普通 task 一定可以分配到该处 |
+| `task_vm_info.virtual_size` | task 的虚拟内存记账值，可能包含 GPU carveout 等特殊保留区，不能直接当作 App 可用容量 |
+| 当前 task 的可寻址上界 | 通过在不同高地址临时保留一个页面测得的本次运行边界 |
+| 最大连续可保留区间 | 当前地址空间中最大的一个连续空洞；它不等于全部空洞之和，也会受现有映射和地址碎片影响 |
+
+#### 实验方法
+
+当前 iPhoneOS 26.5 SDK 不支持 App 直接包含 `<mach/mach_vm.h>`。实验使用公开的 `<mach/mach.h>`，并调用 `vm_allocate`、`vm_deallocate`、`vm_region_64` 与 `task_info`：
+
+1. 用 `vm_region_64` 枚举当前 CPU 地址范围内的 VM Region；
+2. 用 `vm_allocate(..., VM_FLAGS_ANYWHERE)` 二分探测最大连续空洞，精度为 64 MiB；
+3. 在 8、12、16、24、32、48、60 GiB 附近固定保留一个 16 KB 页面；
+4. 在 16～24 GiB 之间继续二分，把当前普通 task 的上界细化到一个页面；
+5. 所有成功保留的区域都不进行读写，并立刻用 `vm_deallocate` 释放；
+6. 对比实验前后的 Memory Footprint、`virtual_size` 和 Region 数量，确认没有把大块虚拟地址转化成同等大小的物理内存占用。
+
+最核心的“保留但不触碰”代码如下：
+
+```objc
+#import <mach/mach.h>
+#import <unistd.h>
+
+static kern_return_t ProbeOnePage(vm_address_t requestedAddress) {
+    vm_size_t pageSize = (vm_size_t)sysconf(_SC_PAGESIZE);
+    vm_address_t address = requestedAddress;
+
+    kern_return_t result = vm_allocate(
+        mach_task_self(),
+        &address,
+        pageSize,
+        VM_FLAGS_FIXED
+    );
+
+    if (result == KERN_SUCCESS) {
+        // 不读、不写，立即释放；这里只验证虚拟地址能否被保留。
+        vm_deallocate(mach_task_self(), address, pageSize);
+    }
+    return result;
+}
+
+static BOOL ReserveAndRelease(vm_size_t size, vm_address_t *resultAddress) {
+    vm_address_t address = 0;
+    kern_return_t result = vm_allocate(
+        mach_task_self(),
+        &address,
+        size,
+        VM_FLAGS_ANYWHERE
+    );
+
+    if (result != KERN_SUCCESS) {
+        return NO;
+    }
+
+    if (resultAddress != NULL) {
+        *resultAddress = address;
+    }
+    vm_deallocate(mach_task_self(), address, size);
+    return YES;
+}
+```
+
+这里绝不能对数 GiB 的测试区域执行 `memset`。一旦真正读写页面，实验问题就会从“虚拟地址能否保留”变成“设备能否提供物理页以及何时被 Jetsam 终止”。
+
+#### iPhone 15 实测结果
+
+本次 App 由 Personal Team 签名，没有 `com.apple.developer.kernel.extended-virtual-addressing` entitlement。得到：
+
+| 观察项 | 真机结果 |
+| --- | --- |
+| 指针宽度 | 64 bit |
+| 页面大小 | 16 KB |
+| SDK 的 `MACH_VM_MAX_ADDRESS` | `0xFC0000000`，即 63 GiB |
+| `task_vm_info.virtual_size` | 391.12 GiB |
+| 63 GiB CPU 上界以下的枚举结果 | 88 个 Region，共 6.12 GiB |
+| GPU carveout | `0x1000000000–0x7000000000`，即 64～448 GiB，共 384 GiB，权限 `---` |
+| 当前普通 task 的页级上界 | `0x458000000`，即 17.375 GiB |
+| 当前最大连续可保留区间 | 约 5.375 GiB，成功样本起点为 `0x300000000`，即 12 GiB |
+| 探测前后 Memory Footprint | 5.33 MiB → 5.33 MiB |
+| 探测前后 `virtual_size` | 391.12 GiB → 391.12 GiB |
+| 探测前后 Region 数 | 88 → 88 |
+
+高地址单页探测结果为：
+
+| 探测位置 | 结果 | 本次实验能说明什么 |
+| --- | --- | --- |
+| 8 GiB 附近 | `KERN_NO_SPACE`（3） | 该范围已经存在映射，失败不代表越过地址上界 |
+| 12 GiB 附近 | 成功 | 普通 task 可以在此处保留页面 |
+| 16 GiB 附近 | 成功 | 当前 task 可寻址范围已经超过 16 GiB |
+| 24、32、48、60 GiB 附近 | `KERN_INVALID_ADDRESS`（1） | 这些候选地址超过了当前未扩展 task 的可分配边界 |
+
+因此，这次实验中的地址关系可以简化成：
+
+```text
+指针宽度：64 bit
+    ≠ App 拥有 2^64 字节可用空间
+
+SDK 公开 CPU 上界：63 GiB
+    ≠ 当前普通 task 的实际上界
+
+当前普通 task 上界：17.375 GiB
+    ≠ 17.375 GiB 全部可供堆使用
+
+当前最大连续空洞：约 5.375 GiB
+    ≠ App 可以安全写入 5.375 GiB 物理内存
+```
+
+391.12 GiB 也不是 App 突然获得了数百 GiB 可用内存。当前 Apple XNU 的 arm64 参数把 `0x1000000000–0x7000000000` 定义为 GPU carveout；真机的 `vm_region_64` 查询也看到同一段 384 GiB、权限为 `---` 的 Region。391.12 GiB 减去这段特殊保留区后只剩 7.12 GiB，其中还包含普通映射与 CPU/GPU 边界处的保留范围；严格限制在 63 GiB CPU 上界以下枚举时得到的是 6.12 GiB。它适合做 task 记账观察，却不能脱离 VM Region 明细直接解释为“App 可用地址空间”。
+
+#### Extended Virtual Addressing 今天应该怎样理解
+
+Apple 目前仍提供 [Extended Virtual Addressing Entitlement](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.developer.kernel.extended-virtual-addressing)，官方只承诺它允许 App 访问扩展地址空间，并没有在文档中承诺一个适用于所有系统版本和设备的固定 GiB 数值。
+
+2022 年文章根据当时的 XNU 把它解释为 64 GB “jumbo”模式。当前 Apple 开源 XNU 的 [`vm_param.h`](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/mach/arm/vm_param.h) 已经出现新的 `EXTENDED_USER_VA_SUPPORT` 路径：内核私有配置可以把 `MACH_VM_MAX_ADDRESS_RAW` 改为 `0x00007FFFFE000000`。这说明旧文里的“扩展后就是 64 GB”不再适合作为永久结论；但开源主分支中的上界也不能反过来当作这台 iPhone 15 已经实测得到的容量。
+
+本次 Personal Team 的 provisioning profile 不包含该 entitlement，Xcode 当前能力元数据也不允许此团队类型启用它，所以这里只完成了“未扩展”基准。以后使用支持该 capability 的开发团队时，应当按下面的顺序复测：
+
+1. 在 Target → Signing & Capabilities 中添加 **Extended Virtual Addressing**；
+2. 检查最终签名 App 的 entitlements，不能只看工程中的 `.entitlements` 文件；
+3. 在同一台设备、相同系统和近似运行状态下再次执行本实验；
+4. 对比页级上界、最大连续空洞和高地址单页探测；
+5. 不把扩展地址空间误写成 RAM、Memory Footprint 或 Jetsam 上限的提高。
 
 ### 从单个地址扩展
 
@@ -833,6 +964,8 @@ flowchart TB
 - [Apple — Reducing your app's launch time](https://developer.apple.com/documentation/xcode/reducing-your-app-s-launch-time)
 - [WWDC21 — Symbolication: Beyond the basics](https://developer.apple.com/videos/play/wwdc2021/10211/)
 - [Apple Kernel Programming Guide — Memory and Virtual Memory](https://developer.apple.com/library/archive/documentation/Darwin/Conceptual/KernelProgramming/vm/vm.html)
+- [Apple — Extended Virtual Addressing Entitlement](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.developer.kernel.extended-virtual-addressing)
+- [Apple Open Source XNU — arm64 VM parameters](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/mach/arm/vm_param.h)
 - [LLDB — GDB to LLDB command map](https://lldb.llvm.org/use/map.html)
 - [LLDB — Symbolication](https://lldb.llvm.org/use/symbolication.html)
 
