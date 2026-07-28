@@ -249,7 +249,7 @@ Mach-O 主要解释启动时已经存在的代码和全局数据，但程序运�
 
 其中，全局变量是指变量值可以在运行时被动态修改，而静态变量是static修饰的变量，包含静态局部变量和静态全局变量
 
-
+----
 
 “五大分区”是更多是一份用户分类，不包括进程中的所有真实映射。Framework、dyld shared cache、`mmap` 文件和 Guard Page 等内容，后文统一用 VM Region 解释。
 
@@ -301,9 +301,9 @@ void RunSimpleMemoryTest(void) {
 
 上面代码里的 `staticNumber` 只是文件作用域的 `static`。`static` 关键字在 C/Objective-C 里其实控制两件不同的事，容易被"是不是进静态区"这一个问题混在一起：
 
-| 位置 | `static` 改变的是什么 | 是否改变存储位置 |
-| --- | --- | --- |
-| 文件作用域（如 `staticNumber`） | 链接可见性：从 external linkage 变成 internal linkage，即这个符号不再能被其他编译单元引用 | 不改变。它本来就具有静态存储期，`static` 只是让它变成"文件私有" |
+| 位置                         | `static` 改变的是什么                                                        | 是否改变存储位置                                            |
+| -------------------------- | ---------------------------------------------------------------------- | --------------------------------------------------- |
+| 文件作用域（如 `staticNumber`）    | 链接可见性：从 external linkage 变成 internal linkage，即这个符号不再能被其他编译单元引用         | 不改变。它本来就具有静态存储期，`static` 只是让它变成"文件私有"               |
 | 函数局部（如 `static int count`） | 存储期：从自动存储期（automatic storage duration）变成静态存储期（static storage duration） | 改变。变量从栈迁移到全局/静态数据区，且只在第一次执行到声明处时初始化一次，之后跨函数调用保留上次的值 |
 
 第一种不会改变内存布局，纯粹是编译期的可见性开关；第二种才是真正会把变量"搬家"的用法，也是实际开发中更常被问到的点。用一段实验代码把第二种行为坐实：
@@ -440,20 +440,16 @@ void RunPointerAndObjectTest(void) {
 ```
 
 将工程保持在 Debug、`-O0`，在标记的三行 `NSLog` 上分别设置断点。每次暂停都执行：
-
 ```lldb
 p/x &object
 p/x object
 memory region &object
 memory region object
 ```
-
 如果当前 LLDB 版本不能直接解析 `memory region object`，就先复制 `p/x` 输出的实际地址，再执行：
-
 ```lldb
 memory region 0x实际地址
 ```
-
 把三次结果记录成下面的表格。不要照抄示例地址，以当次运行结果为准：
 
 | 暂停位置 | `&object` | `object` | `&object` 所在 Region | `object` 所在 Region |
@@ -471,22 +467,12 @@ memory region 0x实际地址
 #### iPhone 15 真机结果
 
 2026 年 7 月 28 日在已连接的 iPhone 15 上运行 `MemoryMapLab`，环境与采集方式如下：
-
-| 项目 | 实际环境 |
-| --- | --- |
-| 设备 | iPhone 15（iPhone15,4，arm64e） |
-| 系统 | iOS 26.5.2（23F84） |
-| Xcode | 26.6（17F113） |
-| 构建 | Objective-C、Debug、`-O0` |
-| 数据来源 | App 对自身地址调用 `vm_region_64`，通过真机控制台采集；不是模拟器或伪造的 LLDB 输出 |
-
 App 启动时连续调用两次实验函数，得到：
 
 | 调用 | `&object` 与 Region | 第 1 个对象 | 第 2 个对象 | 第 3 个对象 | 三个对象所在 Region |
 | --- | --- | --- | --- | --- | --- |
 | 第 1 次 | `0x16f138950`，`0x16f040000–0x16f13c000 rw-` | `0x105da0bc0` | `0x105da0bd0` | `0x105da0be0` | `0x105c00000–0x106000000 rw-` |
 | 第 2 次 | `0x16f138950`，`0x16f040000–0x16f13c000 rw-` | `0x105da0f50` | `0x105da0f60` | `0x105da0f70` | `0x105c00000–0x106000000 rw-` |
-
 这两轮真机数据验证了三个结构性结论：
 
 1. 在每次函数调用内部，三次赋值中的 `&object` 都是同一个地址，它表示当前栈帧中指针变量自己的存储位置。
