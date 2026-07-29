@@ -566,28 +566,23 @@ Tagged Pointer 没有独立堆对象，也就没有一份会因引用计数归�
 | `weak` 注册 | 跳过 weak table | 不会发生对象销毁后清除弱引用的过程 |
 
 对应实现可以在 [`objc-object.h`](https://github.com/apple-oss-distributions/objc4/blob/fb265098298302243cd7eeaa1f63f0ba7786dd9a/runtime/objc-object.h#L1210-L1302) 和 [`objc-weak.mm`](https://github.com/apple-oss-distributions/objc4/blob/fb265098298302243cd7eeaa1f63f0ba7786dd9a/runtime/objc-weak.mm#L392-L399) 中看到。objc4 自带测试也明确验证 Tagged Pointer 会绕过引用计数表、AutoreleasePool 和 weak table，见 [`taggedPointers.m`](https://github.com/apple-oss-distributions/objc4/blob/fb265098298302243cd7eeaa1f63f0ba7786dd9a/test/taggedPointers.m#L199-L227)。
-
 这里不能把 `retainCount` 当作观察工具。源码中的 Tagged Pointer 快速路径甚至会把指针位模式转换成返回值，它不代表一份真实、可解释的对象引用计数。
 
 #### 为什么不能有普通实例变量，却可以有关联对象
 
 实例变量依赖一块真实的对象内存：
-
 ```text
 对象地址 + ivar offset → 实例变量所在位置
 ```
 
 Tagged Pointer 没有这块对象本体，所以 `object_setIvar` 遇到 Tagged Pointer 会直接返回，`object_getIvar` 会返回 `nil`，见 [`objc-class.mm`](https://github.com/apple-oss-distributions/objc4/blob/fb265098298302243cd7eeaa1f63f0ba7786dd9a/runtime/objc-class.mm#L343-L385)。
-
 但关联对象不是普通 ivar。关联关系由 Runtime 在对象本体之外管理，objc4 的测试验证了 Tagged Pointer 能通过 `objc_setAssociatedObject` 和 `objc_getAssociatedObject` 设置、读取和移除关联对象，见 [`taggedPointers.m`](https://github.com/apple-oss-distributions/objc4/blob/fb265098298302243cd7eeaa1f63f0ba7786dd9a/test/taggedPointers.m#L185-L196)。
 
 所以这两个问题并不矛盾：
-
 - **普通 ivar**需要对象本体和固定 offset，Tagged Pointer 不具备；
 - **关联对象**存储在对象本体之外，可以把这个指针值作为关联身份。
 
 #### objc4 对 `NSNumber` 实际证明了什么
-
 objc4 的测试创建了：
 
 ```objc
@@ -614,21 +609,6 @@ NSNumber *taggedNumber = [NSNumber numberWithInt:1234];
 > 与为同一个小值额外创建普通堆对象相比，Tagged Pointer 省去了该对象本体的独立分配及其引用计数管理；它本身不对应一个可用 `memory region` 查询的普通堆对象地址。
 
 这部分属于本文的“地址在哪里”主线。系列下一篇讨论 Clean、Dirty、Compressed 和 Memory Footprint 时，只需要把它作为边界条件回指，不必在那里重新讲一遍 tag 位布局和消息派发。
-
-#### 面试时怎样串起来回答
-
-可以按照下面五步组织答案：
-
-1. **它是什么**：把类型标记和小型 payload 编码进指针值，避免一次普通堆对象分配。
-2. **它在哪里**：局部指针变量仍可能在栈上，但指针值不指向普通对象本体，因此不存在对应的普通堆对象 Region。
-3. **它怎样识别类型**：Runtime 检查标记位，根据 tag 查询专门的类表，而不是从对象内存读取 `isa`。
-4. **它怎样调用方法**：取得 Class 后继续进入正常的消息缓存和方法查找。
-5. **它怎样管理生命周期**：`retain`、`release`、`autorelease` 和 weak 都绕过普通对象路径，不会因引用计数归零执行 `dealloc`。
-
-一句话总结：
-
-> Tagged Pointer 是一种把类型标记和小型数据编码进指针值的 Runtime 优化。它没有普通堆对象本体，也没有可供解引用的 `isa`；`objc_msgSend` 会先识别标记位，通过 Runtime 类表取得 Class，再进入正常的方法查找。它的引用计数和 weak 操作也会绕过普通对象的管理路径。
-
 
 ### 从“指针变量与对象本体”继续追问
 
