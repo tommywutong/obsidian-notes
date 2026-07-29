@@ -186,6 +186,9 @@ Memory Warning 和 Jetsam 是**两套独立机制**，不是一条"先警告、�
 
 循环引用会让对象生命周期超出预期，持续占用它们关联的内存；这属于内存泄漏和对象所有权问题。解码后的大图也可能快速抬高 dirty memory 峰值。二者都值得优化，但不能由此推出"所有 Objective-C 对象都一直占据物理内存，直到手动释放"。
 
+![Snapzy_2026-07-29_16-51-15_745.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/Snapzy_2026-07-29_16-51-15_745.png)
+
+
 ---
 
 ## 总结
