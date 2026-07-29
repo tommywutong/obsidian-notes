@@ -239,7 +239,7 @@ Compressed memory 并没有消失：它仍占用物理内存，只是压缩后�
 共享/文件映射（可能是 clean） --首次写入触发 COW--> 私有 dirty 页 --内存压力--> compressed
 ```
 
-### Memory Footprint：App 真正需要负责的内存
+### Memory Footprint：App 真正负责的内存
 
 ![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260729183653223.png)
 
@@ -251,7 +251,7 @@ Compressed memory 并没有消失：它仍占用物理内存，只是压缩后�
 | `resident_size`               | 当前有多少进程页面驻留在物理内存中       |
 | `TASK_VM_INFO.phys_footprint` | 当前有多少内存被系统记作这个进程需要负责的资源 |
 
-Xcode 中关注的 Memory Footprint 更接近第三种口径，而不是把虚拟地址范围或所有驻留页面简单相加。在 Apple 面向开发者的内存模型中，分析 Footprint 时主要关注 **Dirty Memory 与 Compressed Memory**：dirty 页面不能依靠原始文件直接恢复；它被压缩以后虽然体积可能变小，内容仍需要系统替 App 保存。
+Xcode 中关注的 Memory Footprint 更接近第三种，而不是把虚拟地址范围或所有驻留页面简单相加。在 Apple 面向开发者的内存模型中，分析 Footprint 时主要关注 **Dirty Memory 与 Compressed Memory**：dirty 页面不能依靠原始文件直接恢复；它被压缩以后虽然体积可能变小，内容仍需要系统替 App 保存。
 
 Clean Memory 即使已经驻留，也可能占用物理 RAM；但它的内容能够从可执行文件、Framework 或映射文件重新取得，系统可以在压力下丢弃并在以后重新载入。因此，Clean Memory 通常不是降低 App Footprint 时的首要目标。
 
@@ -595,3 +595,5 @@ Apple 的 [Identifying high-memory use with Jetsam Event Reports](https://develo
 - [iOS 性能优化实践：头条抖音如何实现 OOM 崩溃率下降 50%+](https://juejin.cn/post/6885144933997494280)
 - [你真的了解 OOM 吗？——京东 iOS App 内存优化实录](https://juejin.cn/post/6844904002203697160)
 - [iOS Memory 内存详解（长文）](https://juejin.cn/post/6844903902169710600#heading-22)
+- https://www.mikeash.com/pyblog/friday-qa-2009-03-13-intro-to-the-objective-c-runtime.html
+- https://www.mikeash.com/pyblog/friday-qa-2012-12-28-what-happens-when-you-load-a-byte-of-memory.html
