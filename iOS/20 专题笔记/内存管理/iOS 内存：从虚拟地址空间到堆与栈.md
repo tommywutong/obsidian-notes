@@ -612,6 +612,32 @@ NSNumber *taggedNumber = [NSNumber numberWithInt:1234];
 
 这部分属于本文的“地址在哪里”主线。系列下一篇讨论 Clean、Dirty、Compressed 和 Memory Footprint 时，只需要把它作为边界条件回指，不必在那里重新讲一遍 tag 位布局和消息派发。
 
+#### Tagged Pointer 类表是不是散列表
+
+Tagged Pointer 发送消息时，Runtime 会根据 tag 到类表中取得 Class。虽然它和散列表都在解决“根据一个 key 找到 value”的问题，但这里的类表更接近**直接索引数组**：
+
+```text
+Tagged Pointer
+    ↓ 提取 tag
+tag
+    ↓ 直接作为槽位索引
+objc_tag_classes[tag]
+    ↓
+Class
+```
+
+这个过程不需要先对 tag 计算 hash，也不需要处理普通的哈希冲突，因此不能因为源码中出现“表”就把它叫作散列表。
+
+两者讨论的层级也不同：
+
+| 概念 | 回答的问题 |
+| --- | --- |
+| 五大分区、VM Region | 数据存放在哪里、这段地址从哪里来 |
+| 数组、链表、散列表 | 数据在内存中怎样组织和查找 |
+| Tagged Pointer 类表 | Runtime 怎样根据 tag 快速取得 Class |
+
+一个散列表自身也可能跨越五大分区的多个用途：局部容器指针在 Debug、未优化时可能位于栈，容器对象及动态槽位通常由堆分配器管理，key 和 value 则可能分别是普通堆对象、字符串字面量或 Tagged Pointer。因此，**散列表不是“五大分区”之外的第六个分区，而是一种由现有内存区域承载的数据组织方式**。
+
 ### 从“指针变量与对象本体”继续追问
 
 “指针变量不等于对象本体”不只用于回答对象位于哪里。对象传参、属性访问、ARC、相等性和对象大小等问题，都依赖同一张关系图：
