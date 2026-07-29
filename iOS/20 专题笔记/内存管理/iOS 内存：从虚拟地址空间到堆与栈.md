@@ -467,9 +467,7 @@ memory region 0x实际地址
 
 ### Tagged Pointer
 
-Tagged Pointer 对象（一项私有运行时特性）通过在指针值中存储对象数据来优化性能，省去了对象的堆内存分配。本文通过分析 `NSNumber` 的实现，重点展示这一优化技术的使用及其影响。
-
-Tagged Pointer 对象是 Objective-C 运行时的一项私有特性，Apple 用它来优化部分核心 Foundation 类。
+Tagged Pointer 对象（一项私有运行时特性）通过在指针值中存储对象数据来优化性能，省去了对象的堆内存分配，它最早在 iOS 7 / OS X 10.9 上引入，主要针对 `NSNumber`、`NSDate`、以及长度较短的 `NSString`。下面通过分析 `NSNumber` 的实现，重点展示这一优化技术的使用及其影响。
 
 Objective-C 中的 Tagged Pointer 对象是一种特殊类型的对象指针。如果对象指针是 tagged 的，那么该 tagged 指针所代表的类实例所持有的数据会被完全编码到指针值本身中。不会发生堆内存分配。
 
