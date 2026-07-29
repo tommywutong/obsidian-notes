@@ -467,6 +467,8 @@ memory region 0x实际地址
 
 ### Tagged Pointer
 
+可以先阅读一下[这篇文章]([https://www.mikeash.com/pyblog/friday-qa-2012-07-27-lets-build-tagged-pointers.html](https://www.mikeash.com/pyblog/friday-qa-2012-07-27-lets-build-tagged-pointers.html))， 进行一些了解
+
 前面的关系图默认 `object` 保存的是一个对象地址，沿着这个地址能够找到普通对象本体：
 ```text
 &object  →  指针变量自己的地址
