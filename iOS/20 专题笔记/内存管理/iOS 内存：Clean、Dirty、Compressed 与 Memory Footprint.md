@@ -1,17 +1,17 @@
 ---
 title: 【iOS】内存：从页面状态、Memory Footprint 到 OOM
-published: 2026-07-24
+published: 2026-07-30
 description: 从“地址在哪里”走向“现在占用多少”：梳理页面如何成为 Clean、Dirty 与 Compressed，Memory Footprint 如何增长，以及 iOS 如何处理内存压力与 OOM。
 tags:
   - iOS
   - Memory
   - OOM
   - Jetsam
-category: iOS
+category: "技术"
 series: 2026 暑假 iOS 底层学习
 seriesSlug: ios-internals-2026-summer
 seriesOrder: 2
-draft: true
+draft: false
 ---
 # iOS 内存：从页面状态、Memory Footprint 到 OOM
 
@@ -19,7 +19,7 @@ draft: true
 
 系列上一篇[《iOS 内存地图：从虚拟地址空间到 VM Region》](/blog/ios-memory-map-virtual-address-space-vm-region/)回答的是"一段地址属于哪里、从哪里来"：五大分区给出用途分类，Mach-O、堆和线程栈解释这些区域怎样形成，VM Region 是内核描述它们的真实方式。
 
-但"申请了多大的虚拟地址范围"和"App 当前要为多少物理内存负责"是两个问题。这一篇把观察单位从变量和 Region 切换到内存页，继续追问：这些页面能否重新取得、是否已经被写入、系统怎样计算 Memory Footprint，以及内存压力下系统会做什么。
+但“申请了多大的虚拟地址范围”和“系统当前给 App 记了多少内存账”是两个问题。这一篇把观察单位从变量和 Region 切换到内存页，继续追问：这些页面能否重新取得、是否已经被写入、系统怎样计算 Memory Footprint，以及内存压力下系统会做什么。
 
 ## 本文主线
 
@@ -41,7 +41,7 @@ Dirty 与 Compressed 推高 Memory Footprint
 区分 OOM、内存泄漏与瞬时峰值，并选择对应工具排查
 ```
 
-这篇文章不再重复"这段地址用来做什么、从哪里来"——那是上一篇的内容。这里只回答一个问题：这些页面此刻是否真的占用物理内存，系统怎么为它记账。
+这篇文章不再重复“这段地址用来做什么、从哪里来”——那是上一篇的内容。这里只回答一个问题：这些页面什么时候形成实际的内存责任，系统怎样记账和处理压力。
 
 ---
 
@@ -51,7 +51,7 @@ Dirty 与 Compressed 推高 Memory Footprint
 
 首先推荐阅读：[Friday Q&A 2012-12-28: What Happens When You Load a Byte of Memory](https://www.mikeash.com/pyblog/friday-qa-2012-12-28-what-happens-when-you-load-a-byte-of-memory.html)
 中译版：
-[当你加载一字节内存会发生什么](https://github.com/Biscoffee/apple-docs-vault/blob/main/blogs/zh/mikeash/friday-q-a-2012-12-28-what-happens-when-you-load-a-byte-of-memory.md)
+[读取一字节内存时发生了什么](/resources/mike-ash-friday-qa/05-low-level-c-mach-o-dyld/macho/2012-12-28-what-happens-when-you-load-a-byte-of-memory/)
 
 Apple 在 WWDC18《iOS Memory Deep Dive》中以典型的 16 KiB 页面说明：内存系统以页为粒度管理和统计资源，一个页面可以容纳多个堆对象，一个对象也可能跨越多个页面。因此，哪怕程序只修改其中一个字节，受影响的仍可能是整个页面。
 
@@ -108,11 +108,13 @@ TASK_VM_INFO.phys_footprint
 
 `virtual_size`、`resident_size` 与 `phys_footprint` 不能互相替代。后面的真机实验使用 `task_info(TASK_VM_INFO)` 读取 `phys_footprint`，正是因为本篇要研究的是 App 当前承担的内存责任，而不只是地址空间有多大或多少页面暂时驻留。
 
-![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260724211423574.png)
+![Jetsam 报告中用页数乘以页面大小计算内存用量](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260724211423574.png)
+
+> 图示来源：Apple《Identifying high-memory use with Jetsam Event Reports》。
 
 ## 二、页面为什么会真正占用内存
 
-### 一：`malloc`、首次访问与 Dirty Page
+### 路径一：`malloc`、首次访问与 Dirty Page
 
 以上一篇实验代码中的 `RunMemoryExperiment`（见[上一篇](/blog/ios-memory-map-virtual-address-space-vm-region/)）为例：`malloc(32 * 1024)` 申请一段 32 KiB 空间，与 `memset(heapBuffer, 0x5A, 1)` 真正触碰其中一个字节，并不是同一个动作。分配器可能先为程序准备可用的虚拟地址；当程序首次访问相应页面时，系统才通过按需分页机制建立页面支持。实际变化还会受到页面是否已经存在、写入是否落在同一页以及分配器元数据等因素影响，所以不能机械地推导出"每写一个字节，Memory Footprint 就一定增加 16 KiB"。
 
@@ -139,7 +141,9 @@ TASK_VM_INFO.phys_footprint
 
 当 App 开始写入页面时，相关页面可能从 clean 变为 dirty。下面这张图描述的是"已分配"和"已写入"在页面状态上的区别，而不是上一篇五大分区中的新区域。
 
-![Snapzy_2026-07-24_21-14-54_871.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/Snapzy_2026-07-24_21-14-54_871.png)
+![malloc 只申请地址与实际写入页面的区别](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/Snapzy_2026-07-24_21-14-54_871.png)
+
+> 图示来源：Apple《Reducing your app’s memory use》。
 
 ### 路径二：Copy-on-Write 与 Private Dirty Page
 
@@ -195,8 +199,6 @@ Dirty 表示页面内容已经被修改，不能在不保存内容的情况下�
 
 这里不能简单地说“所有 heap allocation 都是 dirty”。`malloc` 返回地址并不代表整段空间已经获得并写入了对应物理页；尚未触碰的部分、分配器复用的页面和分配器元数据都可能让实际结果与申请字节数不同。
 
-Memory Warning 也不会替 App “只释放 clean memory”。它是系统发给仍能运行的 App 的通知，提醒 App 主动释放可以重建的缓存、图片和临时对象，或者减少并发任务。系统回收 clean page、压缩 dirty page，以及 App 自己解除强引用，是三条不同的路径。Apple 的 [Responding to low-memory warnings](https://developer.apple.com/documentation/xcode/responding-to-low-memory-warnings) 还特别提醒，不要在收到警告后临时遍历整个对象图寻找可释放内容。
-
 理解工具结果时还要区分：
 
 ```text
@@ -219,19 +221,13 @@ Dirty Size
 >
 > 当程序第一次写入某个尚未承担实际内容的页面时，该页才可能进入 dirty 状态。只写第一页和最后一页，不代表中间所有页面都会同时变 dirty。
 >
-> ![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260729181948297.png)
+> ![80,000 字节缓冲区只写首尾页面的 Dirty 状态](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260729181948297.png)
 
 ### Compressed memory
 
-iOS 不为普通 App 的匿名 dirty memory 提供传统磁盘 Swap，而是可以把近期不活跃、又不能直接丢弃的页面压缩后保留在内存中。压缩比例取决于页面内容，没有一个可以通用于所有数据的固定比例；再次访问这些页面时，系统需要先解压。
+iOS 可以把近期不活跃、又不能直接丢弃的页面压缩后保留。压缩比例取决于页面内容，没有一个可以通用于所有数据的固定比例；再次访问这些页面时，系统需要先解压。
 
-Compressed memory 并没有消失：它仍占用物理内存，只是压缩后的占用通常比未压缩时更小，而且仍属于 App 的 Memory Footprint。压缩和解压还会消耗 CPU，因此内存压力也可能表现为性能与能耗问题。
-
-![Snapzy_2026-07-29_18-33-54_314.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/Snapzy_2026-07-29_18-33-54_314.png)
-
-对于可以重新创建的缓存，`NSCache` 通常比无上限的 `NSMutableDictionary` 更合适：它支持自动淘汰策略，也允许从多个线程查询和修改。但淘汰时机与顺序不是业务代码可以依赖的确定保证，仍应合理设置 `countLimit` 或 `totalCostLimit`，具体行为见 Apple 的 [`NSCache`](https://developer.apple.com/documentation/foundation/nscache) 文档。`NSPurgeableData` 则用于内容可以被丢弃的数据，只有在内容没有被标记为正在使用时，系统才可能在低内存情况下丢弃它。
-
-释放缓存时也要考虑压缩页面。遍历很大的对象图或逐项访问一个长期未使用的字典，可能先把相应页面从 compressor 中解压，短时间内反而增加内存压力。这并不是说“删除 Dictionary 一定让物理内存变大”，而是说明收到 Memory Warning 后不应临时扫描所有对象寻找可释放内容；更好的做法是提前设计好有边界、可整体放弃的缓存策略。
+Compressed memory 并没有消失：压缩后的实际存储体积可能比未压缩时更小，但内容仍属于 App 的内存责任。Apple 的工具文档还明确说明，系统对 compressed／swapped dirty memory 的 Footprint 记账按照压缩前的原始大小计算，因此不能把“已经压缩”理解成“App 的内存账单已经减少”。压缩和解压还会消耗 CPU，所以内存压力也可能表现为性能与能耗问题。
 
 在本文采用的 App 内存模型中，三种状态可以用下面这条常见路径连接起来：
 
@@ -239,9 +235,9 @@ Compressed memory 并没有消失：它仍占用物理内存，只是压缩后�
 共享/文件映射（可能是 clean） --首次写入触发 COW--> 私有 dirty 页 --内存压力--> compressed
 ```
 
-### Memory Footprint：App 真正负责的内存
+### Xcode 显示的 App 内存是怎么来的
 
-![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260729183653223.png)
+![Dirty 与 Compressed 构成开发者理解 Memory Footprint 的核心模型](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260729183653223.png)
 
 前面已经出现过三个容易混淆的进程级指标，它们回答的不是同一个问题：
 
@@ -251,27 +247,24 @@ Compressed memory 并没有消失：它仍占用物理内存，只是压缩后�
 | `resident_size`               | 当前有多少进程页面驻留在物理内存中       |
 | `TASK_VM_INFO.phys_footprint` | 当前有多少内存被系统记作这个进程需要负责的资源 |
 
-Xcode 中关注的 Memory Footprint 更接近第三种，而不是把虚拟地址范围或所有驻留页面简单相加。在 Apple 面向开发者的内存模型中，分析 Footprint 时主要关注 **Dirty Memory 与 Compressed Memory**：dirty 页面不能依靠原始文件直接恢复；它被压缩以后虽然体积可能变小，内容仍需要系统替 App 保存。
+Xcode 中关注的 Memory Footprint 更接近第三种，而不是把虚拟地址范围或所有驻留页面简单相加。在 Apple 面向开发者的内存模型中，分析 Footprint 时主要关注 **Dirty Memory 与 Compressed Memory**：dirty 页面不能依靠原始文件直接恢复；它被压缩以后，内容仍需要系统替 App 保存，而且记账使用压缩前的原始大小。
 
 Clean Memory 即使已经驻留，也可能占用物理 RAM；但它的内容能够从可执行文件、Framework 或映射文件重新取得，系统可以在压力下丢弃并在以后重新载入。因此，Clean Memory 通常不是降低 App Footprint 时的首要目标。
 
-这里的“Dirty + Compressed”用于理解和优化，不是 `phys_footprint` 内核实现的完整数学公式。实际记账还会涉及其他系统内存类别，本文不把开发者模型写成一条绝对等式。
+上图和“Dirty + Compressed”用于理解和优化，不是 `phys_footprint` 内核实现的完整数学公式。实际记账还会涉及其他系统内存类别，本文不把开发者模型写成一条绝对等式。
 
 ## 四、iOS 如何应对内存压力
-
-
-![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260725093622870.png)
 
 当 Memory Footprint 持续增长或瞬时峰值过高时，App 可能收到内存警告，也可能在来不及响应警告时被系统终止。下面继续看 iOS 面对内存压力时可以采取哪些措施。
 
 
-### iOS 没有传统意义上的磁盘 Swap
+### 不要依赖桌面式 Swap 为 App 兜底
 
-桌面操作系统通常可以把一部分匿名内存换出到磁盘。Apple 的 iOS 虚拟内存资料和 WWDC18《iOS Memory Deep Dive》强调：iOS 不把普通 App 的 dirty page 当作传统磁盘 swap 的后备存储来使用。
+桌面操作系统通常可以把一部分匿名内存换出到磁盘。较早的 iOS 内存资料常用“iOS 没有传统 Swap”强调移动系统不会让前台 App 依靠无限增长的匿名 dirty memory 长期运行。这个结论表达了正确的开发约束，但放到现代 iOS 上不能再写成绝对事实。
 
-这不等于"iOS 的虚拟内存从不读取存储设备"。App 的可执行文件、动态库和内存映射文件本来就可以按需 page in；clean 的文件映射页被丢弃后，也可以在需要时重新读取。对于 App 开发，关键区别是：不能期待系统把不断增长的匿名 dirty memory 像桌面 swap 一样长期换出，从而替应用兜底。
+Apple 当前的 [Reducing your app’s memory use](https://developer.apple.com/documentation/xcode/reducing-your-app-s-memory-use) 已经说明，iOS 可能把运行在后台的内存密集型 App 转移到固态存储；相关工具也会使用 compressed／swapped dirty memory 的表述。公开文档没有要求开发者把这一实现直接等同于桌面系统逐页换出的传统 Swap，因此这里不进一步猜测系统内部细节。
 
-系统实现会随版本演进，因此比起把原因简单归结为"保护闪存寿命"，更稳妥的结论是：iOS 的内存策略优先考虑移动设备的性能、能耗和系统响应，并通过回收可重建页面、内存压缩以及必要时终止进程来控制压力。
+这也不等于“iOS 的虚拟内存以前从不读取存储设备”。App 的可执行文件、动态库和内存映射文件本来就可以按需 page in；clean 的文件映射页被丢弃后，也可以在需要时重新读取。对于开发者，始终成立的结论是：不能期待系统通过存储转移替不断增长的 Footprint 兜底，更不能因此忽略内存峰值和后台内存。
 
 ### 系统怎样处理不同状态的页面
 
@@ -289,10 +282,7 @@ Clean Memory 即使已经驻留，也可能占用物理 RAM；但它的内容能
 
 ### Memory Warning 与 Jetsam
 
-![Snapzy_2026-07-29_19-37-09_257.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/Snapzy_2026-07-29_19-37-09_257.png)
-
-
-Memory Warning 和 Jetsam 是**两套独立机制**，不是一条"先警告、不处理再杀"的因果链：
+Memory Warning 和 Jetsam 是两种不同机制，都可能出现在系统处理内存压力的过程中，但不能把它们理解成一条“必定先警告、不处理再杀”的固定流程：
 
 - **Memory Warning**（`didReceiveMemoryWarning`）是 UIKit 层面的建议性通知，发给还活着、还能执行代码的进程，本质是系统在说"压力大了，你自己看着办、主动释放点缓存"。它不保证发生在终止之前，也不保证每个即将被终止的进程都收到过。
 
@@ -300,14 +290,13 @@ Memory Warning 和 Jetsam 是**两套独立机制**，不是一条"先警告、�
 
 开发者事后能看到的是 **Jetsam Event Report**，它不同于由异常或信号产生的常规 crash report：进程是被内核从外部终止的，而不是自己触发了某个信号。
 
-App 收到内存警告后，应该释放已经明确标记为可重建、当前又不需要的资源，并减少后续分配，而不是临时遍历整个对象图寻找“看起来能删”的内容。后者可能访问并解压长期未使用的页面，在压力最大的时刻制造额外峰值。
+App 收到内存警告后，应该释放已经明确标记为可重建、当前又不需要的资源，并减少后续分配，而不是临时遍历整个对象图寻找“看起来能删”的内容。后者可能访问并解压长期未使用的页面，在压力最大的时刻制造额外峰值。Apple 的 [Responding to low-memory warnings](https://developer.apple.com/documentation/xcode/responding-to-low-memory-warnings) 也建议提前调整分配策略，而不是在警告到来后扫描整个对象图。
 
 所以准确的说法是：忽略内存警告*可能*增加被 Jetsam 的概率，但 Jetsam 完全可以在没有任何前置警告的情况下发生，比如一个后台进程的 footprint 悄悄涨过了线。
 
 ## 五、iOS 语境下的 OOM
 
-OOM 是 **Out of Memory** 的缩写，分为两大类，Foreground OOM / Background OOM，简写为 FOOM 以及 BOOM。而其中 FOOM 是指 app 在前台时由于消耗内存过大，而被系统杀死，直接表现为 crash。
-从最直接的语义看，它表示系统无法继续满足内存需求；但在 iOS 开发讨论中，“OOM”经常被用来概括几种并不完全相同的结果：
+OOM 是 **Out of Memory** 的缩写。从最直接的语义看，它表示系统无法继续满足内存需求；但在 iOS 开发讨论中，“OOM”经常被用来概括几种并不完全相同的结果：
 
 1. **某次内存申请失败**：从通用编程语义看，这是最直接的 OOM。例如 `malloc` 在无法满足申请时可能返回 `NULL`，其他 API 也可能按照自己的约定返回错误或抛出异常。
 2. **进程超过自身的 Memory Footprint 限制**：App 持续增加 dirty 与 compressed memory，逼近或超过当前设备、进程类型和运行状态对应的限制，系统可能通过资源异常或 Jetsam 终止进程。
@@ -316,6 +305,8 @@ OOM 是 **Out of Memory** 的缩写，分为两大类，Foreground OOM / Backgro
 真实 iOS App 往往在一次普通分配明确返回失败之前，就已经因为内存压力被系统从外部终止。因此，日常所说的“App 发生 OOM”，通常指的是**高内存使用导致的系统终止**，但分析报告时仍应确认实际终止原因，不能看到“突然消失”就直接下结论。
 
 前台发生高内存终止时，用户可能感知到 App 突然退出；后台进程被 Jetsam 时，用户通常不会立即察觉，只会在下次进入时看到 App 重新启动。设备的分析数据或 Xcode 同步的设备日志中可能出现 `JetsamEvent` 报告，它与带有触发线程和调用栈的普通 crash report 不同。
+
+一些工程文章会把前台和后台发生的高内存终止简称为 FOOM（Foreground OOM）与 BOOM（Background OOM）。这是一种便于讨论用户感知和运行状态的行业说法，不是 Apple Jetsam Event Report 的官方原因分类，也不能据此把所有 OOM 严格分成两类。前台终止对用户来说可能“看起来像闪退”，诊断时仍应区分普通 crash report 与 Jetsam Event Report。
 
 OOM、Memory Warning、Jetsam 和内存泄漏之间的关系可以整理为：
 
@@ -373,8 +364,6 @@ OOM 不等于内存泄漏。泄漏可能让 footprint 长期单调上升，但�
 - **切换实现时产生峰值**：先创建新缓存、新页面或新模型，再释放旧内容，会让两代资源短暂共存。
 
 这类问题可能没有任何泄漏：任务结束后内存本来能够下降，但系统在峰值结束之前已经终止了进程。Apple 在 WWDC18《iOS Memory Deep Dive》中专门强调，应按解码后的尺寸分析图片成本，并通过下采样避免为了生成小图而完整解码原图。
-
-![Snapzy_2026-07-29_16-51-15_745.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/Snapzy_2026-07-29_16-51-15_745.png)
 
 ## 六、如何确认和排查一次 OOM
 
@@ -562,6 +551,8 @@ Apple 的 [Identifying high-memory use with Jetsam Event Reports](https://develo
 - 检查不必要的启动期初始化、Framework 和全局数据，确认它们是否在启动路径中过早制造长期存活的 dirty memory；
 - 用同一台真机重复同一条业务路径，比较基线、峰值、操作结束后的回落和多轮执行后的趋势。
 
+对于可以重新创建的缓存，`NSCache` 通常比无上限的 `NSMutableDictionary` 更合适：它支持自动淘汰策略，也允许从多个线程查询和修改。但淘汰时机与顺序不是业务代码可以依赖的确定保证，仍应合理设置 `countLimit` 或 `totalCostLimit`，具体行为见 Apple 的 [`NSCache`](https://developer.apple.com/documentation/foundation/nscache) 文档。`NSPurgeableData` 则适用于内容可以被丢弃的数据；只有在内容没有被标记为正在使用时，系统才可能在低内存情况下丢弃它。
+
 下面两篇工程案例涉及线上监控、归因和治理，适合作为实践层面的延伸阅读：
 
 - [iOS 性能优化实践：头条抖音如何实现 OOM 崩溃率下降 50%+](https://juejin.cn/post/6885144933997494280)
@@ -571,15 +562,16 @@ Apple 的 [Identifying high-memory use with Jetsam Event Reports](https://develo
 
 ## 总结
 
-到这里可以得出五个结论，衔接上一篇的六条：
+到这里可以得出六个结论，分别对应本文的六章：
 
-1. 虚拟地址范围、堆分配量、驻留物理页和 Memory Footprint 是不同指标；内存按页管理，哪怕只写入一个字节，受影响的也可能是整个页面。
-2. Clean、Dirty、Compressed 描述的是页面的可重建性和系统记账状态：clean 页面可以从原始来源重建，因此能够被丢弃；dirty 页面不能在不保存内容的情况下直接丢弃，但 App 可以主动释放它，系统也可以压缩它；compressed 页面仍占用物理内存并计入 Footprint，只是压缩后的占用通常更小。
-3. 对文件支持的 Copy-on-Write 页面来说，首次写入会建立进程私有副本并使相关页面变 dirty；仅仅建立映射或申请虚拟地址，不代表已经产生等量 dirty memory。
-4. iOS 不依赖传统磁盘 Swap 为不断增长的匿名 dirty memory 兜底。回收 clean page、压缩 dirty page、发送 Memory Warning 和通过 Jetsam 终止进程是不同机制，其中 Memory Warning 与 Jetsam 不存在严格的先后因果关系。
-5. iOS 开发中常说的 OOM 通常指高内存导致的系统终止，但它不等于内存泄漏、Memory Warning 或某一种固定的崩溃形式；排查时必须区分持续增长与瞬时峰值，并用 Jetsam 报告、Memory Footprint 和对应工具建立证据链。
+1. 申请或映射虚拟地址，不等于立刻产生等量的 Memory Footprint。内存以页为粒度管理，`virtual_size`、`resident_size`、堆分配量与 `phys_footprint` 回答的是不同问题。
+2. 匿名堆内存的首次写入，以及文件支持页面首次写入触发的 Copy-on-Write，是形成 dirty page 的两条不同路径。一次进程总量采样只能验证趋势，不能精确归因某个页面。
+3. Clean、Dirty 与 Compressed 描述页面能否重新取得以及系统如何保存内容：clean page 可以重新载入；dirty page 不能直接丢弃；compressed page 的实际存储体积可能减小，但 Footprint 仍按压缩前的原始大小记账。
+4. Xcode 关注的 Memory Footprint 不是虚拟地址范围或所有驻留页面的简单总和。开发者模型主要关注 Dirty 与 Compressed，但这不是 `phys_footprint` 内核实现的完整数学公式。
+5. 现代 iOS 会回收 clean page、压缩页面，也可能把后台内存密集型 App 转移到固态存储。开发者不能依赖桌面式 Swap 为不断增长的 Footprint 兜底；Memory Warning 与 Jetsam 是不同机制，警告不是终止前的必经步骤。
+6. iOS 工程中常说的 OOM 通常指高内存导致的系统终止，但它不等于内存泄漏、Memory Warning 或普通崩溃。排查时应先确认 Jetsam 报告中的 `reason`，再区分持续增长与瞬时峰值，并用对应工具建立证据链。
 
-结合上一篇的六条结论，两篇文章合起来回答了同一个问题的两个层面：一段内存"在哪里、从哪里来"，以及它"现在是否真的占用物理内存、系统怎样为它记账"。地址空间部分见系列上一篇[《iOS 内存地图：从虚拟地址空间到 VM Region》](/blog/ios-memory-map-virtual-address-space-vm-region/)。
+结合上一篇的六条结论，两篇文章合起来回答了同一个问题的两个层面：一段内存“在哪里、从哪里来”，以及它“什么时候形成实际的内存责任、系统怎样记账和处理压力”。地址空间部分见系列上一篇[《iOS 内存地图：从虚拟地址空间到 VM Region》](/blog/ios-memory-map-virtual-address-space-vm-region/)。
 
 ## 参考资料
 
@@ -591,9 +583,9 @@ Apple 的 [Identifying high-memory use with Jetsam Event Reports](https://develo
 - [Apple — Viewing Virtual Memory Usage](https://developer.apple.com/library/archive/documentation/Performance/Conceptual/ManagingMemory/Articles/VMPages.html)
 - [Apple — Identifying high-memory use with Jetsam Event Reports](https://developer.apple.com/documentation/xcode/identifying-high-memory-use-with-jetsam-event-reports)
 - [Apple — Reduce terminations in your app](https://developer.apple.com/documentation/xcode/reduce-terminations-in-your-app)
+- [Apple — Analyzing the memory usage of your Metal app](https://developer.apple.com/documentation/xcode/analyzing-the-memory-usage-of-your-metal-app)
 - [WWDC18 — iOS Memory Deep Dive](https://developer.apple.com/videos/play/wwdc2018/416/)
+- [Mike Ash — What Happens When You Load a Byte of Memory](https://www.mikeash.com/pyblog/friday-qa-2012-12-28-what-happens-when-you-load-a-byte-of-memory.html)
 - [iOS 性能优化实践：头条抖音如何实现 OOM 崩溃率下降 50%+](https://juejin.cn/post/6885144933997494280)
 - [你真的了解 OOM 吗？——京东 iOS App 内存优化实录](https://juejin.cn/post/6844904002203697160)
 - [iOS Memory 内存详解（长文）](https://juejin.cn/post/6844903902169710600#heading-22)
-- https://www.mikeash.com/pyblog/friday-qa-2009-03-13-intro-to-the-objective-c-runtime.html
-- https://www.mikeash.com/pyblog/friday-qa-2012-12-28-what-happens-when-you-load-a-byte-of-memory.html

@@ -24,7 +24,7 @@ draft: false
 
 受限于当时的知识面，这两篇文章对很多概念的理解较浅，部分表述也不够严谨。现在重新梳理 iOS 底层知识，希望从操作系统的虚拟内存出发，把"变量在哪里""对象在哪里""堆和栈是什么""Mach-O 的 Segment 又是什么"这些容易混在一起的问题逐层分开。
 
-这篇文章只回答"一段虚拟地址属于哪里、由谁在什么时候放进去的"。这些地址背后的页面此刻是否真的占用物理内存、系统怎样统计和回收，放在系列下一篇《iOS 内存：Clean、Dirty、Compressed 与 Memory Footprint》里单独展开。
+这篇文章只回答"一段虚拟地址属于哪里、由谁在什么时候放进去的"。这些地址背后的页面什么时候形成实际的内存责任、系统怎样统计和处理压力，放在系列下一篇[《iOS 内存：从页面状态、Memory Footprint 到 OOM》](/blog/ios-memory-page-states-footprint-oom/)里单独展开。
 
 ## 主线
 
@@ -895,7 +895,7 @@ VM Region 是内核和调试工具观察进程虚拟地址空间的实际单位�
 - 每个线程的栈也对应自己的 Region，并可能带有 Guard Region；
 - 指针变量与它指向的对象本体可能落在不同 Region。
 
-本篇继续观察“地址在哪里、映射从哪里来”。`virtual_size`、`resident_size`、Clean、Dirty、Compressed 与 Memory Footprint 等页面记账和回收问题，留到系列下一篇《iOS 内存：Clean、Dirty、Compressed 与 Memory Footprint》展开。
+本篇继续观察“地址在哪里、映射从哪里来”。`virtual_size`、`resident_size`、Clean、Dirty、Compressed 与 Memory Footprint 等页面记账和回收问题，留到系列下一篇[《iOS 内存：从页面状态、Memory Footprint 到 OOM》](/blog/ios-memory-page-states-footprint-oom/)展开。
 
 到这里已经知道：
 
@@ -1257,7 +1257,7 @@ MemoryMapExperiment 进程的虚拟地址空间
 5. Mach-O 解释启动时的代码和数据如何进入地址空间；堆和线程栈则解释运行过程中出现的动态区域；ASLR 会改变映像每次运行的加载地址，符号化的本质就是把这个偏移减回去。
 6. 回答"变量和对象在哪里"时，必须分别讨论变量本身、变量保存的地址、对象本体以及字面量或 Tagged Pointer 等例外。
 
-这六条结论回答的都是"在哪里"和"从哪里来"。但虚拟地址范围、堆分配量、驻留物理页和 Memory Footprint 是不同的指标——一段地址被"分配"，不代表它现在真的占用同等大小的物理内存。这句话正好是系列下一篇的起点：《iOS 内存：Clean、Dirty、Compressed 与 Memory Footprint》会继续讨论 Clean、Dirty、Compressed 与内存压力下的回收策略。
+这六条结论回答的都是"在哪里"和"从哪里来"。但虚拟地址范围、堆分配量、驻留物理页和 Memory Footprint 是不同的指标——一段地址被"分配"，不代表它现在真的形成了同等大小的内存责任。这句话正好是系列下一篇的起点：[《iOS 内存：从页面状态、Memory Footprint 到 OOM》](/blog/ios-memory-page-states-footprint-oom/)会继续讨论 Clean、Dirty、Compressed 与内存压力下的回收策略。
 
 ## 参考资料
 
