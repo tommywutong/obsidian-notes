@@ -467,19 +467,167 @@ memory region 0x实际地址
 
 ### Tagged Pointer
 
-Tagged Pointer 对象（一项私有运行时特性）通过在指针值中存储对象数据来优化性能，省去了对象的堆内存分配，它最早在 iOS 7 / OS X 10.9 上引入，主要针对 `NSNumber`、`NSDate`、以及长度较短的 `NSString`。下面通过分析 `NSNumber` 的实现，重点展示这一优化技术的使用及其影响。
+前面的关系图默认 `object` 保存的是一个对象地址，沿着这个地址能够找到普通对象本体：
+```text
+&object  →  指针变量自己的地址
+object   →  指针变量保存的对象地址
+                         ↓
+                    普通堆对象本体
+                    ├── isa
+                    └── 实例数据
+```
 
-Objective-C 中的 Tagged Pointer 对象是一种特殊类型的对象指针。如果对象指针是 tagged 的，那么该 tagged 指针所代表的类实例所持有的数据会被完全编码到指针值本身中。不会发生堆内存分配。
+Tagged Pointer 是这张图最重要的例外。对于某些能够装进一个指针值的小型对象，Runtime 可以把**类型标记（tag）和对象数据（payload）直接编码进指针值**，不再为它单独分配普通堆对象：
+```text
+&number  →  局部指针变量自己的地址
+number   →  [ 标记位 | tag | payload ]
+                          └── 不再指向普通堆对象本体
+```
 
-省去堆内存分配可以显著降低成本，例如一个包含 `NSNumber` 对象的 `NSArray`。在堆上分配的 `NSNumber` 至少使用 16 字节（因为分配是 16 字节对齐的），再加上其指针的 8 字节。然而，编码到 tagged 指针中的 `NSNumber` 只使用其指针的 8 字节，通过不调用分配器同时节省了内存和时间。
+这里应当把“指针变量”和“指针值”继续分开：局部变量 `number` 在 Debug 实验中仍可能位于线程栈，变化的是它里面保存的值——这个值不再是一块普通对象内存的地址，而是数据编码后的完整位模式。
 
+> 本节依据本机 Apple objc4 源码进行分析，主仓库检出版本为 `objc4-951.1`，并用本机 `objc4-951.7` 对关键路径做了交叉检查。下文涉及的 `_objc_makeTaggedPointer`、`_objc_getTaggedPointerTag` 等符号属于 Runtime 内部实现或 SPI，用来读源码和理解原理，不应作为 App 业务代码依赖的公开 API。
 
+#### Runtime 怎样标记一个 Tagged Pointer
 
+objc4 在 64 位环境启用 Tagged Pointer 支持；arm64 iOS 使用最高位作为识别标记。Runtime 内部提供了“创建、判断、取得 tag、取得 payload”等操作：
 
+```text
+对象的逻辑值
+    ↓
+tag + payload
+    ↓
+编码、混淆为一个指针值
+    ↓
+Runtime 通过标记位识别它
+```
 
+在本次检出的 objc4 中，基础 tag `0...6` 逻辑上可以携带 60 位 payload，扩展 tag `8...263` 逻辑上可以携带 52 位 payload；`7` 和 `264` 被保留。源码中列出的 tag 包括 `NSString`、`NSNumber`、`NSIndexPath`、`NSManagedObjectID`、`NSDate`、`UIColor`、`CGColor`、`NSIndexSet` 等，详见 Apple objc4 的 [`objc-internal.h`](https://github.com/apple-oss-distributions/objc4/blob/fb265098298302243cd7eeaa1f63f0ba7786dd9a/runtime/objc-internal.h#L480-L545)。
 
+这些枚举只说明 Runtime 为相应类型保留了 tag，不能反推出“这个类的所有实例都是 Tagged Pointer”。例如，同一个 `NSNumber` 类族中，有些值可能编码进指针，有些值仍需要普通堆对象；最终选择属于 Foundation 的具体实现。
 
+当前 arm64 源码还启用了 **Split Tagged Pointer** 表示：
 
+- 第 63 位承担 Tagged Pointer 的识别标记；
+- 基础 tag 的索引位位于低 3 位；
+- 扩展 tag 使用另一段高位区域；
+- payload 会根据基础或扩展格式进行移动与截取；
+- 指针值还可能经过 obfuscator 混淆，基础 tag 也可能被重新排列。
+
+相关宏和编解码过程见 [`objc-internal.h`](https://github.com/apple-oss-distributions/objc4/blob/fb265098298302243cd7eeaa1f63f0ba7786dd9a/runtime/objc-internal.h#L605-L860)，混淆初始化见 [`objc-runtime-new.mm`](https://github.com/apple-oss-distributions/objc4/blob/fb265098298302243cd7eeaa1f63f0ba7786dd9a/runtime/objc-runtime-new.mm#L9644-L9683)。
+
+这解释了为什么不能拿旧文章中的固定位图，直接切割今天真机上打印出的十六进制值。旧版 objc4 曾把基础 tag 放在更高的位段，当前 split 布局和混淆策略已经不同；Apple 也在源码中明确提醒，Tagged Pointer 的布局和用法可能随 OS 版本变化。可以记住“标记位 + 类型 + 数据”的思想，但不要把某一版的具体位偏移写进业务逻辑。
+
+#### 没有普通对象本体和 isa，为什么还能发送消息
+
+普通 Objective-C 对象接收消息时，`objc_msgSend` 可以从对象内存开头读取 `isa`，取得 Class 后再查找方法缓存：
+
+```text
+普通对象地址
+    ↓ 读取对象内存
+isa
+    ↓
+Class
+    ↓
+方法缓存与方法查找
+```
+
+Tagged Pointer 不能走第一步：它不是一个可供解引用的普通对象地址，也没有一块对象内存存放 `isa`。arm64 的 `objc_msgSend` 会在读取 `[x0]` 之前先区分普通对象、`nil` 和 Tagged Pointer：
+
+```text
+消息接收者
+    ├── nil → 返回零值
+    ├── 普通对象 → 从对象内存读取 isa
+    └── Tagged Pointer → 从指针位中取得 tag
+                              ↓
+                         查询 Runtime 类表
+                              ↓
+                            Class
+                              ↓
+                         正常方法缓存查找
+```
+
+汇编中的 `GetTaggedClass` 会从接收者的位模式计算类表索引，把查到的 Class 放入寄存器，然后和普通对象一样进入 `CacheLookup`。这条分支可以直接在 Apple objc4 的 [`objc-msg-arm64.s`](https://github.com/apple-oss-distributions/objc4/blob/fb265098298302243cd7eeaa1f63f0ba7786dd9a/runtime/Messengers.subproj/objc-msg-arm64.s#L559-L606) 中看到。C++ 层的 `objc_object::getIsa()` 也先判断 Tagged Pointer，再查询 `objc_tag_classes` 或扩展类表，见 [`objc-object.h`](https://github.com/apple-oss-distributions/objc4/blob/fb265098298302243cd7eeaa1f63f0ba7786dd9a/runtime/objc-object.h#L75-L93)。
+
+因此，“Tagged Pointer 没有 isa”并不等于“它没有 Class”：
+
+> 普通对象通过对象本体里的 `isa` 找到 Class；Tagged Pointer 通过自身携带的 tag 到 Runtime 类表中找到 Class。
+
+#### retain、release、autorelease 和 weak 会怎样
+
+Tagged Pointer 没有独立堆对象，也就没有一份会因引用计数归零而销毁的对象本体。objc4 对它做了专门的快速处理：
+
+| 操作 | Runtime 行为 | 原因 |
+| --- | --- | --- |
+| `retain` | 直接返回自身 | 不需要增加普通引用计数 |
+| `release` | 不触发释放或 `dealloc` | 没有需要回收的独立堆对象 |
+| `autorelease` | 直接返回自身 | 不进入普通对象的 AutoreleasePool 记账路径 |
+| `tryRetain` | 直接成功 | 不存在普通对象正在析构的状态 |
+| `weak` 注册 | 跳过 weak table | 不会发生对象销毁后清除弱引用的过程 |
+
+对应实现可以在 [`objc-object.h`](https://github.com/apple-oss-distributions/objc4/blob/fb265098298302243cd7eeaa1f63f0ba7786dd9a/runtime/objc-object.h#L1210-L1302) 和 [`objc-weak.mm`](https://github.com/apple-oss-distributions/objc4/blob/fb265098298302243cd7eeaa1f63f0ba7786dd9a/runtime/objc-weak.mm#L392-L399) 中看到。objc4 自带测试也明确验证 Tagged Pointer 会绕过引用计数表、AutoreleasePool 和 weak table，见 [`taggedPointers.m`](https://github.com/apple-oss-distributions/objc4/blob/fb265098298302243cd7eeaa1f63f0ba7786dd9a/test/taggedPointers.m#L199-L227)。
+
+这里不能把 `retainCount` 当作观察工具。源码中的 Tagged Pointer 快速路径甚至会把指针位模式转换成返回值，它不代表一份真实、可解释的对象引用计数。
+
+#### 为什么不能有普通实例变量，却可以有关联对象
+
+实例变量依赖一块真实的对象内存：
+
+```text
+对象地址 + ivar offset → 实例变量所在位置
+```
+
+Tagged Pointer 没有这块对象本体，所以 `object_setIvar` 遇到 Tagged Pointer 会直接返回，`object_getIvar` 会返回 `nil`，见 [`objc-class.mm`](https://github.com/apple-oss-distributions/objc4/blob/fb265098298302243cd7eeaa1f63f0ba7786dd9a/runtime/objc-class.mm#L343-L385)。
+
+但关联对象不是普通 ivar。关联关系由 Runtime 在对象本体之外管理，objc4 的测试验证了 Tagged Pointer 能通过 `objc_setAssociatedObject` 和 `objc_getAssociatedObject` 设置、读取和移除关联对象，见 [`taggedPointers.m`](https://github.com/apple-oss-distributions/objc4/blob/fb265098298302243cd7eeaa1f63f0ba7786dd9a/test/taggedPointers.m#L185-L196)。
+
+所以这两个问题并不矛盾：
+
+- **普通 ivar**需要对象本体和固定 offset，Tagged Pointer 不具备；
+- **关联对象**存储在对象本体之外，可以把这个指针值作为关联身份。
+
+#### objc4 对 `NSNumber` 实际证明了什么
+
+objc4 的测试创建了：
+
+```objc
+NSNumber *taggedNumber = [NSNumber numberWithInt:1234];
+```
+
+随后验证它是 `OBJC_TAG_NSNumber`，能够提取和还原 payload，能够调用 `intValue`、`isKindOfClass:`、`respondsToSelector:`，能够放入数组、字典和集合，也能够桥接为 `CFNumberRef`。测试代码见 [`taggedNSPointers.m`](https://github.com/apple-oss-distributions/objc4/blob/fb265098298302243cd7eeaa1f63f0ba7786dd9a/test/taggedNSPointers.m#L10-L54)。
+
+这份源码能够证明的是：Runtime 提供了 Tagged Pointer 的识别、类映射、消息派发和内存管理基础设施，并且测试覆盖了一个 Tagged `NSNumber` 的对象行为。它不能独立证明以下结论：
+
+- 所有 `NSNumber`、短 `NSString` 或 `NSDate` 都一定使用 Tagged Pointer；
+- 某种类型在所有系统版本上都具有固定的编码范围；
+- Foundation 在当前 iOS 中判断“放得下”的精确阈值；
+- 真机打印出的某个十六进制值能够按照旧版位布局直接解码。
+
+这些选择由 Foundation 等上层框架的具体实现决定，而且可能随系统版本、值类型和创建方式变化。面试中应回答“**可能采用 Tagged Pointer 优化**”，而不是把某个旧系统上的阈值说成永久规则。
+
+#### 它与 VM Region 和 Memory Footprint 的关系
+
+后文 iPhone 15 真机实验中，`@(runtimeValue)` 得到的完整位模式无法通过 `memory region` 查询到普通对象区域。原因不是“这块对象内存比较特殊”，而是这个值根本没有指向独立的对象本体。
+
+不过，“没有一次普通堆对象分配”也不能扩展成“使用 Tagged Pointer 完全没有任何内存成本”。保存它的局部变量、数组或字典中的元素槽位仍然需要空间，Runtime 的类表和框架代码也客观存在。准确结论是：
+
+> 与为同一个小值额外创建普通堆对象相比，Tagged Pointer 省去了该对象本体的独立分配及其引用计数管理；它本身不对应一个可用 `memory region` 查询的普通堆对象地址。
+
+这部分属于本文的“地址在哪里”主线。系列下一篇讨论 Clean、Dirty、Compressed 和 Memory Footprint 时，只需要把它作为边界条件回指，不必在那里重新讲一遍 tag 位布局和消息派发。
+
+#### 面试时怎样串起来回答
+
+可以按照下面五步组织答案：
+
+1. **它是什么**：把类型标记和小型 payload 编码进指针值，避免一次普通堆对象分配。
+2. **它在哪里**：局部指针变量仍可能在栈上，但指针值不指向普通对象本体，因此不存在对应的普通堆对象 Region。
+3. **它怎样识别类型**：Runtime 检查标记位，根据 tag 查询专门的类表，而不是从对象内存读取 `isa`。
+4. **它怎样调用方法**：取得 Class 后继续进入正常的消息缓存和方法查找。
+5. **它怎样管理生命周期**：`retain`、`release`、`autorelease` 和 weak 都绕过普通对象路径，不会因引用计数归零执行 `dealloc`。
+
+一句话总结：
+
+> Tagged Pointer 是一种把类型标记和小型数据编码进指针值的 Runtime 优化。它没有普通堆对象本体，也没有可供解引用的 `isa`；`objc_msgSend` 会先识别标记位，通过 Runtime 类表取得 Class，再进入正常的方法查找。它的引用计数和 weak 操作也会绕过普通对象的管理路径。
 
 
 ### 从“指针变量与对象本体”继续追问
