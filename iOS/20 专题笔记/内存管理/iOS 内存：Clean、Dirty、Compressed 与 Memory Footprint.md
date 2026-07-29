@@ -187,6 +187,21 @@ iOS设备没有swapped memory，而是采用Compressed Memory机制，一般情�
 共享/文件映射（可能是 clean） --首次写入触发 COW--> 私有 dirty 页 --内存压力--> compressed
 ```
 
+### 内存占用
+
+![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260729183653223.png)
+对于 app 来说，我们主要关心的内存是 dirty memory，当然其中也包含 compressed memory。而对于 clean memory，作为开发者通常可以不必关心。
+
+当内存占用的部分过大，就会发生前文所说的内存警告以及 OOM 崩溃等情况，所以我们应该尽可能的减少内存占用，并对内存警告以及 OOM 崩溃做好防范。减少内存占用也能侧面提升启动速度，要加载的内存少了，自然启动速度会变快。
+
+按照正常的思路，app 监听到内存警告时应该主动清理释放掉一些优先级低的内存，这本质上是没错的。不过由于 compressed memory 的特殊性，所以导致内存占用的实际大小考虑起来会有些复杂。
+
+![Snapzy_2026-07-29_18-33-54_314.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/Snapzy_2026-07-29_18-33-54_314.png)
+
+比如上面这种情况，当我们收到内存警告时，我们尝试将 Dictionary 中的部分内容释放掉，但由于之前的 Dictionary 由于未使用，所以正处于被压缩状态；而解压、释放部分内容之后，Dictionary 处于未压缩状态，可能并没有减少物理内存，甚至可能反而让物理内存更大了。
+
+所以，进行缓存更推荐使用 NSCache 而不是 NSDictionary，就是因为 NSCache 不仅线程安全，而且对存在 compressed memory 情况下的内存警告也做了优化，可以由系统自动释放内存。
+
 ### Copy-on-Write：页面怎样从"可共享"变成"进程私有"
 
 上一篇提到，Mach-O 的 `__DATA` 段这类可写数据可能通过 Copy-on-Write 形成进程私有页面——这里补上具体机制：
@@ -242,6 +257,8 @@ OOM 是 **Out of Memory** 的缩写，指的是在 iOS 设备上当前应用因�
 3. **系统整体内存压力下被选中终止**：App 未必单独达到一个固定数字，但系统需要迅速回收资源时，内核可能根据进程优先级、状态和内存责任选择它作为 Jetsam 对象。
 
 真实 iOS App 往往在一次普通分配明确返回失败之前，就已经因为内存压力被系统从外部终止。因此，日常所说的“App 发生 OOM”，通常指的是**高内存使用导致的系统终止**，但分析报告时仍应确认实际终止原因，不能看到“突然消失”就直接下结论。
+
+OOM 分为两大类，Foreground OOM / Background OOM，简写为 FOOM 以及 BOOM。而其中 FOOM 是指 app 在前台时由于消耗内存过大，而被系统杀死，直接表现为 crash。
 
 OOM、Memory Warning、Jetsam 和内存泄漏之间的关系可以整理为：
 
@@ -496,3 +513,4 @@ Apple 的 [Identifying high-memory use with Jetsam Event Reports](https://develo
 - [WWDC18 — iOS Memory Deep Dive](https://developer.apple.com/videos/play/wwdc2018/416/)
 - [# iOS 性能优化实践：头条抖音如何实现 OOM 崩溃率下降50%+](https://juejin.cn/post/6885144933997494280?searchId=20260725091107C08106C1FFC05727A26C)
 - [# 你真的了解OOM吗？——京东iOS APP内存优化实录](https://juejin.cn/post/6844904002203697160?searchId=202607242005413F8E66D396B122E9CEF3)
+- [iOS Memory 内存详解 (长文)](https://juejin.cn/post/6844903902169710600?searchId=202607242005413F8E66D396B122E9CEF3#heading-22)
