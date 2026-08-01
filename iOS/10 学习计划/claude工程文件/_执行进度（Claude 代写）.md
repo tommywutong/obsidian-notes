@@ -49,11 +49,11 @@ draft: true
 
 | 已有内容 | 判定 |
 | --- | --- |
-| `iOS/Runtime/Part 1 - 对象与类的本质.md`（88KB） | 已完成，质量高 → **直接引用，不重写** |
-| `iOS/Runtime/Part 2 - 消息发送与转发.md`（146KB） | 同上 → **引用** |
-| `iOS/Runtime/Part 3 - Category.md`（57KB） | 同上 → **引用** |
-| `iOS/Runtime/Part 4 - Runtime 应用篇.md`（72KB） | draft，需**补完**（Swizzling / +load / KVO isa-swizzling） |
-| `iOS/Runtime/Method - Swizzling.md` | 与 Part 4 重叠 → 合并进 Part 4 后作为素材保留 |
+| `iOS/20 专题笔记/Runtime/Part 1 - 对象与类的本质.md`（88KB） | 已完成，质量高 → **直接引用，不重写** |
+| `iOS/20 专题笔记/Runtime/Part 2 - 消息发送与转发.md`（146KB） | 同上 → **引用** |
+| `iOS/20 专题笔记/Runtime/Part 3 - Category：加载、覆盖与关联对象.md`（57KB） | 同上 → **引用** |
+| `iOS/20 专题笔记/Runtime/Part 4 - Runtime 应用篇.md`（72KB） | draft，需**补完**（Swizzling / +load / KVO isa-swizzling） |
+| `iOS/20 专题笔记/Runtime/素材/Method - Swizzling.md` | 与 Part 4 重叠 → 合并进 Part 4 后作为素材保留 |
 | `20 专题笔记/内存管理/…从虚拟地址空间到堆与栈.md`（700 行） | 基本完成 → 只做收尾 / 翻 draft |
 | `20 专题笔记/内存管理/…Clean、Dirty、Compressed….md`（206 行） | **已成文**（含真机实测 + 总结 + 参考），与"刚开始"的印象不符 → 保留，只补链接与 draft 状态 |
 | `20 专题笔记/并发与运行循环/GCD.md`（28KB） | 旧碎片笔记 → **重写为正式长文** |
@@ -103,7 +103,7 @@ draft: true
       weakSelf 的 block 里两次读同一变量得到 `A` 和 `null`，dance 之后两次都是 `B` 且事后无泄漏。
 
 ### 第三周：Runtime 行为与对象通信（Runtime/、Runtime 与对象通信/）
-- [ ] 08 补完 `Runtime/Part 4 - Runtime 应用篇.md`
+- [ ] 08 补完 `20 专题笔记/Runtime/Part 4 - Runtime 应用篇.md`
 - [x] 11 KVC 与 KVO：搜索顺序、isa-swizzling 与手动触发（Runtime 与对象通信/）—— Day 5，待审查
       **实测硬料**：
       - `setValue:forKey:` 的 setter 链实测是 `set<Key>:` → `_set<Key>:` → **`setIs<Key>:`**。
@@ -170,7 +170,7 @@ draft: true
       + `_actorQueueManager`），不是旧文章/上一版初稿说的 1 个；后两个服务于 iOS 26 类型化通知。
       `MainActorMessage` / `AsyncMessage` 定义已从本机 SDK swiftinterface 抄原文。
 - [x] 13 Method Swizzling：正确姿势、+load 时机与那些坑（Runtime 与对象通信/）—— Day 2 + Day 4，待审查
-      定位：`Runtime/Part 4` 与 `Runtime/Method - Swizzling.md` 的**实证补充**，不重复原理与场景。
+      定位：`20 专题笔记/Runtime/Part 4` 与 `20 专题笔记/Runtime/素材/Method - Swizzling.md` 的**实证补充**，不重复原理与场景。
       **实测硬料**：
       - 直接 exchange 继承来的方法，后果不是"父类被污染"这么温和：`Parent` 和 `Sibling` 当场
         `-[Parent hook_greet]: unrecognized selector` 崩溃，崩溃栈却显示 `-[Child(Hook) hook_greet]`。
@@ -760,7 +760,7 @@ RunLoop 重写、AutoreleasePool、事件传递与响应者链、UIViewControlle
 **最后做的三件事**：
 1. 全系列双链体检——扫出并修掉 8 类真实坏链（`iOS UIView 与 CALayer：树结构…`→`三棵树…` 4 处、
    `iOS UIViewController 生命周期与容器控制器`→`生命周期的真实顺序与…`、
-   五条 `Runtime/xxx` 路径写错）。**文章之间的坏链现在是 0。**
+   五条 `20 专题笔记/Runtime/xxx` 路径写错）。**文章之间的坏链现在是 0。**
    残留 4 条 `.png` 缺图链接属用户原有的 `RunLoop 与 AutoReleasePool.md`，不在本次范围。
 2. 补上网络分层篇（37）缺失的"下一篇"指针，链条接到综合项目设计文档（38）。
 3. 修掉 03 篇内部的一处自相矛盾：第四节论证了 `@42` 是 `NSConstantIntegerNumber` 不是 tagged，

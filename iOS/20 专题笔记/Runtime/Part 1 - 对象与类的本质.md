@@ -193,7 +193,7 @@ Class ISA(bool authenticated = false) const;                     // 对外取类
 
 不管是内部用的 `isa()`，还是对外的 `ISA()`，它们去读那 8 个裸字节时，都是指的同一个——`isa_t`。换句话说，`objc_object` 这个壳本身没几两肉，它把「对象到底属于哪个类、引用计数是多少、有没有关联对象、是否被弱引用」这些信息，**全都打包压进了 `isa_t` 这 8 个字节里**。
 
-![[isa_storage_to_isa_t_steps.html]]
+![[素材/isa_storage_to_isa_t_steps.html]]
 
 所以「对象的本质是什么」这个问题，到这里就收敛成了：`isa_t` 里到底装了什么？
 ## isa_t
@@ -247,7 +247,7 @@ ISA_BITFIELD struct ：同一块 8 字节按「位」拆开，摊成 `nonpointe
 
 > 也就是说，内存本身没有类型，字节本身从来没有变过，变的只是你怎么解读他
 
-![[isa_t_three_views.html]]
+![[素材/isa_t_three_views.html]]
 
 ### ISA_BITFIELD：isa 的位布局
 
@@ -305,7 +305,7 @@ uintptr_t has_sidetable_rc  : 1;    // bit24
 uintptr_t extra_rc          : 7;    // bit25-31 内联引用计数
 ```
 
-![[isa_t-四套架构位布局对照（可切换）.html]]
+![[素材/isa_t-四套架构位布局对照（可切换）.html]]
 
 这里顺手补一个老版 Runtime 里很经典的问题：为什么字段叫 `shiftcls`，而且旧源码里经常能看到类似 `isa.shiftcls = (uintptr_t)cls >> 3` 的写法？
 
@@ -404,7 +404,7 @@ uintptr_t has_sidetable_rc:1; extra_rc:8;
 
 一句话记忆：**老博客那张 isa 图（`shiftcls:33`/`magic`/`deallocating`）一直用到 781；分水岭是 781↔818，arm64e 上为了塞进 PAC 签名，一口气合并了 `shiftcls` 并删掉了 `magic`、`deallocating` 两个字段。** 而 781 之前五年（680→781）arm64 布局几乎没动过
 
-![[isa-evolution.html]]
+![[素材/isa-evolution.html]]
 
 > 注意：上面的对照只针对 **arm64e**。同一份 818/951 源码里，arm64（非 e）、x86_64 分支仍保留着 `magic` / `has_cxx_dtor`（见前一节的 ②③），所以「老字段消失」只发生在开了指针签名的 arm64e 上。
 
@@ -570,7 +570,7 @@ uintptr_t value = (obfuscator ^ ptr);   // 编码/解码都要异或这个值
 
 
 下面用一张图总结一下：isa_t 
-![[isa_t_layout 1.html]]
+![[素材/isa_t_layout 1.html]]
 
 
 # 对象的内存布局
@@ -926,7 +926,7 @@ struct cache_t {
 };
 ```
 
-![[cache_t_layout.html]]
+![[素材/cache_t_layout.html]]
 
 ### bits ：class_rw_t → class_ro_t
 
@@ -1210,7 +1210,7 @@ struct class_rw_ext_t {
 };
 ```
 
-![[rw_ro_ext_layout.html]]
+![[素材/rw_ro_ext_layout.html]]
 
 #### 还有两块「不弄脏内存」的优化（同属 WWDC2020）
 
@@ -1228,7 +1228,7 @@ clean / dirty 这条思路在 951.7 里不止用在 `ro`，还有两处也值得
 
 前面 `cache_t` 那个 union 里的 `_originalPreoptCache`，指向的就是 **dyld 共享缓存里预先算好的方法缓存**：`NSObject`、`UIView` 这类系统类的高频 `SEL → IMP` 在构建共享缓存时就填好了，App 启动时它们的缓存**不必从空冷启动**，同样以 clean memory 形式被各进程共享。`cache_t::initializeToEmptyOrPreoptimizedInDisguise()` 就是在「空缓存」与「预优化缓存」之间做选择。
 
-![[objc_runtime_three_era_html.html]]
+![[素材/objc_runtime_three_era_html.html]]
 
 # 元类 metaclass
 

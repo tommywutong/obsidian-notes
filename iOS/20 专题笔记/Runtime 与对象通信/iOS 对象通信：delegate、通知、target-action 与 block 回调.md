@@ -66,7 +66,7 @@ AppKit 写了，UIKit 没写。所以正确的态度是：按"不 retain"写代�
 2. 一个对象加一份编译期契约。delegate 是这个。调用时它仍然退化成第 1 种。
 3. 一个函数指针加一份捕获的环境。block 回调是这个，`addObserverForName:...usingBlock:` 也是这个。
 
-前两种最终都落到 `objc_msgSend(receiver, sel, ...)`，走 [[Runtime/Part 2 - 消息发送与转发]] 里那条完整的查找路径。第三种绕开消息发送，直接调 `Block_layout.invoke`。细节在 [[iOS Block 的结构：ABI、descriptor 与三种类型]]。
+前两种最终都落到 `objc_msgSend(receiver, sel, ...)`，走 [[20 专题笔记/Runtime/Part 2 - 消息发送与转发]] 里那条完整的查找路径。第三种绕开消息发送，直接调 `Block_layout.invoke`。细节在 [[iOS Block 的结构：ABI、descriptor 与三种类型]]。
 
 所以"哪种更快"有确定答案，我在第六节测了。但速度基本不该进入选型判据，那节真正有用的是另外两个数字。
 
@@ -898,7 +898,7 @@ extension Foundation.NotificationCenter {
 
 ### 本地
 
-- [[Runtime/Part 2 - 消息发送与转发]]
+- [[20 专题笔记/Runtime/Part 2 - 消息发送与转发]]
 - [[iOS 属性关键字：从所有权推导，而不是从类型名猜]]
 - [[iOS Block 循环引用与 weak-strong dance]]
 - [[iOS Block 的结构：ABI、descriptor 与三种类型]]

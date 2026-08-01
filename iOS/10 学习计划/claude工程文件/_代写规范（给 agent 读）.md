@@ -156,7 +156,7 @@ draft: true
 
 ## 七、本地可引用的已有笔记
 
-- `iOS/Runtime/对象与类的本质.md`、`消息发送与转发.md`、`Category：加载、覆盖与关联对象.md` —— 用户自己写的，质量高，**引用不重写**
+- `iOS/20 专题笔记/Runtime/Part 1 - 对象与类的本质.md`、`Part 2 - 消息发送与转发.md`、`Part 3 - Category：加载、覆盖与关联对象.md` —— 用户自己写的，质量高，**引用不重写**
 - `iOS/20 专题笔记/内存管理/` 下六篇、`对象模型/` 一篇、`Block/` 三篇 —— 本系列已完成部分，可双链引用
 - `iOS/20 专题笔记/编译链接与启动/dyld.md` —— 可用，需补充
 - `iOS/90 素材/csdn-import/` —— 用户早年文章，KVC / MVC / MVVM / SDWebImage 几篇可引用

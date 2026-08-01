@@ -57,7 +57,7 @@ draft: false
 - **14. 收尾**：一条消息的命运 + 与 Part 1 的呼应 + 转向 Runtime 应用篇
 
 
-![[objc_msgSend_full_pipeline.html]]
+![[素材/objc_msgSend_full_pipeline.html]]
 
 > 源码定位说明：`objc_msgSend` 汇编在 951.7 里已移到 `runtime/Messengers.subproj/objc-msg-arm64.s`（不在 `runtime/` 根下）。本文以本地 objc4-951.7 源码行号为准；源码块多数是围绕本文主线裁剪后的关键片段，标注“全文”的函数/宏才表示对应范围逐字完整。中文注释为本文新增、英文原注释保留。LLDB 在 **系统 libobjc**（`/usr/lib/libobjc.A.dylib`）上下符号断点，`settings set target.disable-aslr true` 关 ASLR，环境 macOS 26 / arm64。
 >
@@ -823,7 +823,7 @@ static inline mask_t cache_hash(SEL sel, mask_t mask)
    方向本身不影响正确性，只影响探测顺序。arm64 选择反向探测有一个具体的汇编优化原因：`objc_msgSend` 的汇编热路径里，探测循环的终止条件是"回到起点 `begin`"。反向探测时，`begin` 是探测的起始下标，也是循环的终止边界，汇编里可以复用同一个寄存器做比较，减少寄存器压力。同时，递减操作在 arm64 的 `SUBS` 指令里天然设置 condition flags，可以直接用条件跳转，不需要额外的比较指令。
 
    你在上面 `insert` 代码里看到的 `cache_next` 调用，走的就是这条 arm64 路径，所以探测方向是递减的
-![[ObjC-cache_t-bucket_t-完整梳理.html]]
+![[素材/ObjC-cache_t-bucket_t-完整梳理.html]]
 
 ### 2. 快速路径汇编逐段（`objc-msg-arm64.s`）
 
@@ -1310,7 +1310,7 @@ br    x17                         // NORMAL 模式：直接跳进方法体执行
 
 
 
-![[CacheLookup-宏逻辑梳理.html]]
+![[素材/CacheLookup-宏逻辑梳理.html]]
 
 
 
@@ -1443,7 +1443,7 @@ sub   x0, x16, x17             // imp = isa - imp_offs
 ```
 动机（951 新增注释自陈）：共享缓存越来越大，32 位 imp 偏移不够「够到」远处的 IMP，于是把 imp 偏移扩到 38 位（再 `<<2` 进一步增大寻址范围），sel 偏移压到 26 位（足够寻址 ~64MB 选择子表）。
 
-![[Objective-C-快速路径查找要点总结.html]]
+![[素材/Objective-C-快速路径查找要点总结.html]]
 
 ### 3. 缓存的写入与扩容（`objc-cache.mm`）
 
@@ -1544,7 +1544,7 @@ void cache_t::insert(SEL sel, IMP imp, id receiver)
 这里有一个容易看漏的小分支：`CACHE_ALLOW_FULL_UTILIZATION` 打开时，容量很小的 cache（`FULL_UTILIZATION_CACHE_SIZE = 8`）允许临时用到 100%。这不是说所有 cache 都可以填满，而是小表为了避免过早扩容，允许在 `newOccupied + CACHE_END_MARKER <= capacity` 的边界内继续使用原表。对应到汇编读路径，`CacheLookup` 不能只依赖“撞到空槽”结束查找；它还必须在 wrap-around 时判断“是否绕回最初探测的 bucket”，否则满表场景会扫不完。`objc-msg-arm64.s:424` 那句 `A full cache can happen with CACHE_ALLOW_FULL_UTILIZATION.` 说的就是这个边界。
 
 
-![[cache_t-insert-交互式流程演示.html]]
+![[素材/cache_t-insert-交互式流程演示.html]]
 
 #### 3.2 `reallocate`：翻倍扩容、丢弃旧表不迁移（:808）
 
@@ -1830,7 +1830,7 @@ IMP lookUpImpOrForward(id inst, SEL sel, Class cls, int behavior)
 
 函数接收消息接收者 `inst`、选择子 `sel`、目标类 `cls` 以及行为标志位 `behavior`，最终返回一个可执行的函数指针 `IMP`。它的核心使命是：**用尽一切手段找到方法实现，实在找不到就交给转发系统**。整个过程全程持有 `runtimeLock` 全局锁，保证"查找 + 缓存回填"对"方法增删"操作的原子性，避免多线程竞争导致缓存脏写。
 
-![[lookUpImpOrForward-流程图 (1).html]]
+![[素材/lookUpImpOrForward-流程图 (1).html]]
 
 
 旧→新对照（756.2 → 951.7）：查找函数的签名与「乐观缓存查找」
@@ -2099,7 +2099,7 @@ Process exited with status = 0 (0x00000000)
 
  **当一个 SEL 在类的继承链上找不到任何实现时，运行时会给类一次机会，让它在运行时动态注册这个方法；如果类放弃了这个机会，消息才会真正进入转发流程。​**
 
-![[Objective-C-动态方法解析全流程梳理.html]]
+![[素材/Objective-C-动态方法解析全流程梳理.html]]
 
 
 > 易混提示：**:7528 是 `resolveMethod_locked`**（解析入口），真正给元类发 `+resolveInstanceMethod:` 的 `resolveInstanceMethod` 函数在 **:7483**——两者别混（:7478 只是 `resolveInstanceMethod` 的注释行）。
@@ -2500,7 +2500,7 @@ objc4 里的实现逐字全文（注意注释——真正跑的是 CF 版本）�
 - `forwardingTargetForSelector:` / `methodSignatureForSelector:` / `doesNotRecognizeSelector:` 的调用方全是 `CoreFoundation ___forwarding___`（闭源），且后两者命中的是 **CF 重写版** `-[NSObject(NSObject) …]`，正好印证 `NSObject.mm` 里 `// Replaced by CF (throws an NSException)`；
 - 所以「OC 抛 `NSInvalidArgumentException`」是 CF 干的，objc4 自己的 `doesNotRecognizeSelector:` 只会 `_objc_fatal`（纯 libobjc 进程才走得到）。
 
-![[Objective-C-消息转发全流程梳理.html]]
+![[素材/Objective-C-消息转发全流程梳理.html]]
 
 ### 12. 其实发生了两次动态方法决议
 
