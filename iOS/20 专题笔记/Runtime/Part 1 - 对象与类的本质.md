@@ -458,13 +458,21 @@ isa_t::getClass(MAYBE_UNUSED_AUTHENTICATED_PARAM bool authenticated) const {
 
 到这里我们讲的「对象」，都是堆上一块内存、开头一根 `isa` 的普通对象。但其实还有一类「对象」根本没有 `isa`——它就是 **Tagged Pointer（标记指针）**。
 
-对一个 `NSNumber *n = @5` 这种**又小又高频**的值类型来说，为了一个 `5` 去 `malloc` 一块堆内存、维护 `isa`、再管引用计数，实在太奢侈。Tagged Pointer 的思路很直接：**干脆不分配内存，把「类型标记 + 数据本身」直接塞进那 8 字节的指针里。** 这个「指针」根本不指向任何地址，**它本身就是数据**——`@5` 里的 `5`，就藏在这根「指针」的二进制位里。
+![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260803003008744.png)
+
+这个指针中，其实只使用了中间高亮部分来表示一个真实的对象指针，由于字节对齐的原因，低位总是0；由于我们不会真正用到所有64进行寻址，所以高位也有一部分总是0。
 
 这个设计不是凭空出现的。2013 年，苹果在 iPhone 5s / A7 把 iOS 带进 64 位时代后，指针从 4 字节变成 8 字节，`NSNumber`、`NSDate` 这类小对象如果仍然都走堆分配，内存压力会被放大。WWDC 2013 Session 404《Advances in Objective-C》里就专门讲过 Tagged Pointer：把小值直接塞进指针后，典型收益可以概括成三点：相关对象内存占用下降、访问更快、创建销毁成本大幅降低。老资料里常引用的量级是：内存约省一半、访问约快 3 倍、创建销毁约快 100 倍。
 
-所以 Tagged Pointer 的动机不是“炫技”，而是 64 位迁移后对小对象成本的一次系统性优化：能不分配就不分配，能不进堆就不进堆。
 
-### 怎么判定一个指针是不是 Tagged Pointer
+对一个 `NSNumber *n = @5` 这种**又小又高频**的值类型来说，为了一个 `5` 去 `malloc` 一块堆内存、维护 `isa`、再管引用计数，实在太奢侈。Tagged Pointer 的思路很直接：**干脆不分配内存，把「类型标记 + 数据本身」直接塞进那 8 字节的指针里。** 这个「指针」根本不指向任何地址，**它本身就是数据**——`@5` 里的 `5`，就藏在这根「指针」的二进制位里。
+
+![Snapzy_2026-08-03_00-31-48_022.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/Snapzy_2026-08-03_00-31-48_022.png)
+![Snapzy_2026-08-03_00-32-28_628.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/Snapzy_2026-08-03_00-32-28_628.png)
+![Snapzy_2026-08-03_00-32-45_054.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/Snapzy_2026-08-03_00-32-45_054.png)
+
+
+### 判定一个指针是不是 Tagged Pointer
 
 判定逻辑只有一行（`objc-internal.h`）：
 
