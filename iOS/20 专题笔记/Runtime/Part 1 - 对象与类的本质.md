@@ -932,14 +932,6 @@ struct cache_t {
 
 ### bits：类数据的入口（ro → rw → rw_ext）
 
-这一段容易乱，是因为源码里同时出现了 `bits`、`class_ro_t`、`class_rw_t`、`class_rw_ext_t`，还夹着旧版和新版结构。先不要逐字段记忆，按下面三个问题往下看：
-
-1. **`bits` 是什么？**——它是类数据的入口，不是方法、属性本身。
-2. **`ro`、`rw`、`rw_ext` 各自负责什么？**——分别对应编译期内容、realize 后的运行期状态，以及按需创建的可变扩展数据。
-3. **这些指针什么时候发生变化？**——答案就在后面的 `realizeClass`。
-
-因此本节的阅读顺序是：**先看指针主线，再用结构体确认里面存了什么，最后通过 `realizeClass` 看 `bits` 怎样从 `ro` 切换到 `rw`。** 第一遍不需要记住 PAC、掩码和每个字段。
-
 `bits` 本身是一个 `class_data_bits_t`，内部核心仍是一个机器字大小的整数。这个整数同时承载**类数据指针**和少量**快速标志位**，方法、属性、协议并不直接存放在这 8 字节里。
 
 而且 `bits` 后面的结构不是始终不变的。类刚从 Mach-O 映射进来、尚未被 realize 时，它直接指向编译期生成的 `class_ro_t`；类第一次真正被 Runtime 使用后，Runtime 才分配 `class_rw_t` 并让 `bits` 改为指向它。绝大多数类到这里就够了，只有确实需要合并 Category 或动态修改方法、属性、协议时，才继续按需分配 `class_rw_ext_t`：
@@ -965,25 +957,28 @@ objc_class.bits ─data()───────→ class_rw_t
 
 #### 先分清两个同名的 bits
 
-> **此 `bits` 非彼 `bits`**：前面讲对象时，`isa_t` 里也有个 `uintptr_t bits`（isa 那 8 字节本身）。这里类对象的 `bits` 是 `class_data_bits_t`，和它**同名、套路相同（都是"指针+标志位塞进一个字"）、但管的事完全不同**。一路从 isa 看下来到这儿容易卡住，单独拎出来对比一下：
+> 前面讲对象时，`isa_t` 里也有个 `uintptr_t bits`（isa 那 8 字节本身）。这里类对象的 `bits` 是 `class_data_bits_t`，和它**同名、套路相同（都是"指针+标志位塞进一个字"）、但管的事完全不同**。一路从 isa 看下来到这儿容易卡住，单独拎出来对比一下：
 
-| 维度 | `isa_t.bits`（每个对象都有） | `class_data_bits_t.bits`（只有类对象有） |
-|---|---|---|
-| 位置 | 对象头那 8 字节 | `objc_class` 第 4 个字段；在本文 objc4-951.1 的 64 位布局里位于 `isa/super/cache` 之后，即偏移 `0x20`（这是私有实现，不是稳定 ABI） |
-| 指针载荷 | **类指针**（arm64e 下还涉及 PAC 签名） | realize 前为 **`class_ro_t *`**，realize 后为 **`class_rw_t *`** |
+| 维度   | `isa_t.bits`（每个对象都有）                                               | `class_data_bits_t.bits`（只有类对象有）                                                                                           |
+| ---- | ------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------- |
+| 位置   | 对象头那 8 字节                                                          | `objc_class` 第 4 个字段；在本文 objc4-951.1 的 64 位布局里位于 `isa/super/cache` 之后，即偏移 `0x20`（这是私有实现，不是稳定 ABI）                          |
+| 指针载荷 | **类指针**（arm64e 下还涉及 PAC 签名）                                        | realize 前为 **`class_ro_t *`**，realize 后为 **`class_rw_t *`**                                                                |
 | 附加信息 | 引用计数 `extra_rc` + `nonpointer`/`has_assoc`/`weakly_referenced` 等标志 | 低 3 位是 `FAST_IS_SWIFT_LEGACY`、`FAST_IS_SWIFT_STABLE`、`FAST_HAS_DEFAULT_RR`；64 位下另用最高位 `FAST_IS_RW_POINTER` 标记当前是否已经指向 `rw` |
-| 取真身 | 按当前平台的 `ISA_MASK` / PAC 流程取得 **Class / 元类** | 按 `FAST_DATA_MASK` / PAC 流程取得 **`class_ro_t` 或 `class_rw_t`** |
-| 回答的问题 | 这个对象**属于哪个类** | 这个类**有哪些方法/属性/协议** |
+| 取chu | 按当前平台的 `ISA_MASK` / PAC 流程取得 **Class / 元类**                        | 按 `FAST_DATA_MASK` / PAC 流程取得 **`class_ro_t` 或 `class_rw_t`**                                                              |
 
-到这里先停一下：`isa_t.bits` 解决的是“**对象属于哪个类**”，`class_data_bits_t.bits` 解决的是“**这个类的数据在哪里**”。下面所有的 `ro / rw / rw_ext` 都只属于第二个问题。
 
-#### 从旧版到新版：先认职责，再看实现
+`isa_t.bits` 解决的是“**对象属于哪个类**”，`class_data_bits_t.bits` 解决的是“**这个类的数据在哪里**”。
+
+#### 从旧版到新版
 
 下面先看旧版（以 objc4-779.1 及更早版本为例），再看本文使用的新版。放旧版不是为了让你背两套源码，而是因为旧版把 `ro`、方法数组和运行期字段直接铺在 `class_rw_t` 中，更容易看清各自职责；新版主要是在此基础上增加原子访问、PAC，并把少用的可变数据拆进 `class_rw_ext_t`。
 
 第一次读这些代码只追踪一件事：**类名、实例大小和原始方法列表在 `ro`；运行期状态在 `rw`；需要合并或修改的方法、属性、协议才进入 `rw_ext`。**
 
 ##### 旧版：ro 和可变数组直接挂在 rw 上
+
+![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260802220821840.png)
+
 
 ```objc
 // 旧版 class_data_bits_t：bits 是裸 uintptr_t，无 atomic / 无 ptrauth
@@ -1037,7 +1032,7 @@ struct class_ro_t {
 
 ##### 新版入口：class_data_bits_t
 
-看完旧版的直观关系，再看新版 `bits` 怎样保存 `ro` 或 `rw` 指针。下面的 `FAST_*` 掩码负责从同一个机器字里区分真正的地址和附加标志；第一遍只需看懂 `has_rw_pointer()`、`data()`、`safe_ro()` 三个入口。
+看完旧版的直观关系，再看新版 `bits` 怎样保存 `ro` 或 `rw` 指针。下面的 `FAST_*` 掩码负责从同一个机器字里区分真正的地址和附加标志；只需看懂 `has_rw_pointer()`、`data()`、`safe_ro()` 三个入口。
 
 `bits` 的真身 `class_data_bits_t`（它用到的 `FAST_*` 掩码先列出）：
 ```objc
@@ -1187,8 +1182,6 @@ public:
     const protocol_array_t protocols() const;
 };
 ```
-
-到这里看到的是三个结构的“静态快照”，但还有一个问题没有回答：`bits` 最初指向 `ro`，究竟在哪一刻、通过哪些语句改成指向 `rw`？下面的 `realizeClassWithoutSwift` 就是把这张静态结构图真正执行起来的过程。
 
 #### realizeClass：ro/rw 
 
