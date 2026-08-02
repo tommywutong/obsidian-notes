@@ -45,6 +45,8 @@ Runtime 是一套用 C（和少量汇编）编写的 API 库，它是 OC「动�
 
 # 对象的本质：objc_object
 
+我们可以先通过这篇文章来简单了解Objecti-C：[About Objective-C](https://github.com/XiyouMobile3G-iOS/apple-developer-archive-vault/blob/main/documentation/Cocoa/Programming%20with%20Objective-C/About%20Objective-C.md)
+
 ## objc_object：对象的骨架
 
 我们平时写的 `NSObject *obj`、`id`、`Class`，在公开头文件 `objc.h` 里其实是一组**裸指针 typedef**：
