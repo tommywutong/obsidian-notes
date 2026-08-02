@@ -207,7 +207,7 @@ hr.dim{border:none;border-top:1px solid var(--border);margin:20px 0}
     <div class="card-row"><span class="ty">protocol_ref_array_t</span>&nbsp;<span class="nm">protocols</span><div class="rowtip">合并后的完整协议列表</div></div>
     <div class="card-row"><span class="ty">char *</span>&nbsp;<span class="nm">demangledName</span><div class="rowtip">Swift 类名解码后的 ObjC 名</div></div>
     <div class="card-row"><span class="ty">uint32_t</span>&nbsp;<span class="nm">version</span><div class="rowtip">类版本号</div></div>
-    <div class="card-row muted">Category 附加 / method_setImplementation</div>
+    <div class="card-row muted">Category 附加 / class_addMethod 等扩展</div>
     <div class="card-row muted">↳ 触发创建，方法列表在这里合并</div>
   </div>
 
@@ -227,7 +227,7 @@ hr.dim{border:none;border-top:1px solid var(--border);margin:20px 0}
       bits 直接存的是 class_ro_t*<br>
       低位 bit 用作区分标志<br><br>
       <span style="color:var(--blue)">bits = (class_ro_t* | flag)</span><br>
-      data() 检测标志后返回 ro
+      safe_ro() 可取 ro；data() 此时不可用
     </div>
   </div>
 
@@ -329,7 +329,7 @@ hr.dim{border:none;border-top:1px solid var(--border);margin:20px 0}
   <div style="padding:14px 16px">
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
       <div>
-        <div style="font-family:var(--mono);font-size:10.5px;color:var(--text3);margin-bottom:8px">旧方案（objc4-781 之前）</div>
+        <div style="font-family:var(--mono);font-size:10.5px;color:var(--text3);margin-bottom:8px">旧方案（objc4-779.1 及更早）</div>
         <div class="saving-bar">
           <div class="saving-seg" style="flex:1;background:rgba(96,165,250,.25);color:var(--blue)">class_ro_t</div>
           <div class="saving-seg" style="flex:1;background:rgba(251,113,133,.35);color:var(--coral)">class_rw_t（全部类）</div>
@@ -337,11 +337,11 @@ hr.dim{border:none;border-top:1px solid var(--border);margin:20px 0}
         <div style="font-family:var(--mono);font-size:10px;color:var(--text2);line-height:1.8;margin-top:8px">
           每个类都分配 class_rw_t<br>
           含完整 methods / props / protos<br>
-          <span style="color:var(--coral)">典型 App ≈ 30MB 用于 rw</span>
+          <span style="color:var(--coral)">Apple 样本设备：系统合计约 30MB</span>
         </div>
       </div>
       <div>
-        <div style="font-family:var(--mono);font-size:10.5px;color:var(--text3);margin-bottom:8px">新方案（objc4-781+）</div>
+        <div style="font-family:var(--mono);font-size:10.5px;color:var(--text3);margin-bottom:8px">新方案（objc4-781 起）</div>
         <div class="saving-bar">
           <div class="saving-seg" style="flex:1;background:rgba(96,165,250,.25);color:var(--blue)">class_ro_t</div>
           <div class="saving-seg" style="flex:9;background:rgba(45,212,191,.2);color:var(--teal);font-size:9px">class_rw_t（精简，无 methods）</div>

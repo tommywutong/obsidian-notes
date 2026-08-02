@@ -37,7 +37,6 @@ draft: false
 ### 第二部分 · 慢速查找（lookUpImpOrForward）
 - **4. 入口**：加锁 + realize / +initialize（:7672）
 - **5. 在当前类找方法**
-  - 5.0 方法列表的一项：`SEL`、Type Encoding 与 `IMP`
   - 5.1 `getMethodNoSuper_nolock` 遍历方法列表（:7338）
   - 5.2 已排序表二分查找 `findMethodInSortedMethodList`（:7110 → :7054）
 - **6. 沿 superclass 链逐层上溯**（每层先查父类 cache）
@@ -1885,23 +1884,6 @@ if (!cls || !cls->ISA()) {
 
 ### 5. 在当前类找方法
 
-#### 5.0 方法列表的一项：SEL、Type Encoding 与 IMP
-
-Part 1 只负责说明方法列表挂在类数据后面；真正查找方法时，需要知道列表中的一项至少回答三件事：
-
-```text
-method_t
-├─ name  ：SEL，方法叫什么
-├─ types ：Type Encoding，返回值和参数是什么类型
-└─ imp   ：IMP，真正的机器代码在哪里
-```
-
-老版 `method_t` 常被概括为三根 64 位指针：`SEL name`、`const char *types`、`IMP imp`，一项共 24 字节。新版的 `method_t::small` 把三者改为相对自身位置计算的 32 位偏移，一项缩为 12 字节。相对偏移不随镜像加载地址变化，因此不需要为了 ASLR 在加载时重写这些指针，方法列表可以继续留在只读、可共享的页面中。
-
-`int32_t` 也意味着目标必须位于可表达的相对范围内；无法使用小格式时，Runtime 仍支持较大的绝对指针格式。修改一个 small method 的 IMP 时也不会直接改脏只读方法项，`method_t::setImp()` 会把替换后的 IMP 记到 `smallMethodIMPMap`，读取时再优先取这份映射。
-
-因此下面代码里出现的“单表、多表数组、相对偏移表”和 `method_t::small / big / bigSigned`，都只是同一份方法信息的不同存储表示。业务代码不要直接解析私有布局，应使用 `method_getName`、`method_getTypeEncoding`、`method_getImplementation` 等公开 API。
-
 #### 5.1 `getMethodNoSuper_nolock` 遍历方法列表（:7338）
 
 在不向父类查找的前提下，于本类方法表里按SEL查找方法实现：
@@ -1913,8 +1895,7 @@ getMethodNoSuper_nolock(Class cls, SEL sel)
     lockdebug::assert_locked(&runtimeLock.get());
 
     ASSERT(cls->isRealized());
-    // realize == class_rw_t 已构建，data() 和方法列表访问器可以使用。
-    // 基础列表仍可能直接来自只读的 class_ro_t；只有需要扩展时才分配 class_rw_ext_t。
+    // realize == class_rw_t 已构建、方法/属性/协议列表已经从只读段拷贝出来并可被运行时增删。未 realize 的类直接查方法是没有意义的，因为 `data()` 返回的内容还没有展开
     // fixme nil cls?
     // fixme nil sel?
 

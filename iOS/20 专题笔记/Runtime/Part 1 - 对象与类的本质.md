@@ -714,7 +714,7 @@ struct objc_class : objc_object {
 3. **`cache`** → 方法缓存。一条消息查到对应的实现后，会缓存在这里，下次同样的消息直接命中、跳过慢速查找。
 4. **`bits`** → 类数据的「入口」。它不是直接把方法、属性等内容塞在一个整数里，而是用一根“指针 + 标志位”带我们找到后面的 `class_ro_t`、`class_rw_t`，必要时再找到 `class_rw_ext_t`。
 
-### superclass：父类指针（arm64e 上同样被签名）
+### superclass：父类指针
 
 `superclass` 就是一根指向父类的 `Class` 指针。但在 arm64e 上，它和 `isa` 一样会被 PAC 签名（具体见前文），所以读写都得走专门的访问器，不能直接当地址用：
 
@@ -930,123 +930,393 @@ struct cache_t {
 
 ![[素材/cache_t_layout.html]]
 
-### bits：类数据的入口
+### bits：类数据的入口（ro → rw → rw_ext）
 
-`objc_class` 里的 `bits` 是一个 `class_data_bits_t`。它本身并不直接保存方法、属性和协议，而是把**类数据指针**和少量**快速标志位**压进一个机器字，作为进入类数据的入口。
+这一段容易乱，是因为源码里同时出现了 `bits`、`class_ro_t`、`class_rw_t`、`class_rw_ext_t`，还夹着旧版和新版结构。先不要逐字段记忆，按下面三个问题往下看：
 
-这个入口会随着类的生命周期改变指向：
+1. **`bits` 是什么？**——它是类数据的入口，不是方法、属性本身。
+2. **`ro`、`rw`、`rw_ext` 各自负责什么？**——分别对应编译期内容、realize 后的运行期状态，以及按需创建的可变扩展数据。
+3. **这些指针什么时候发生变化？**——答案就在后面的 `realizeClass`。
+
+因此本节的阅读顺序是：**先看指针主线，再用结构体确认里面存了什么，最后通过 `realizeClass` 看 `bits` 怎样从 `ro` 切换到 `rw`。** 第一遍不需要记住 PAC、掩码和每个字段。
+
+`bits` 本身是一个 `class_data_bits_t`，内部核心仍是一个机器字大小的整数。这个整数同时承载**类数据指针**和少量**快速标志位**，方法、属性、协议并不直接存放在这 8 字节里。
+
+而且 `bits` 后面的结构不是始终不变的。类刚从 Mach-O 映射进来、尚未被 realize 时，它直接指向编译期生成的 `class_ro_t`；类第一次真正被 Runtime 使用后，Runtime 才分配 `class_rw_t` 并让 `bits` 改为指向它。绝大多数类到这里就够了，只有确实需要合并 Category 或动态修改方法、属性、协议时，才继续按需分配 `class_rw_ext_t`：
 
 ```text
-尚未 realize：
-objc_class.bits ─────────────────────────→ class_ro_t
+编译产物 / 尚未 realize：
+objc_class.bits ──────────────→ class_ro_t
 
-已经 realize，但不需要扩展数据：
-objc_class.bits ─→ class_rw_t ───────────→ class_ro_t
-
-已经 realize，而且需要扩展数据：
-objc_class.bits ─→ class_rw_t ─→ class_rw_ext_t ─→ class_ro_t
-                                      ├─ methods
-                                      ├─ properties
-                                      └─ protocols
+realize 之后：
+objc_class.bits ─data()───────→ class_rw_t
+                                      │
+                                      ▼
+                               ro_or_rw_ext（二选一）
+                                  ├─通常────→ class_ro_t
+                                  └─需要扩展→ class_rw_ext_t
+                                                ├─ ro ─→ class_ro_t
+                                                ├─ methods
+                                                ├─ properties
+                                                └─ protocols
 ```
 
-因此不要把它机械地背成固定的“`bits → rw → ro`”。准确说法是：**realize 前 `bits` 直接指向 `ro`；realize 后改为指向 `rw`，`rw` 再通过 `ro_or_rw_ext` 找到 `ro` 或按需分配的 `rw_ext`。**
+> 这里直接阅读 `objc_class`、`class_rw_t` 等私有结构，是为了理解 Runtime 的实现，不代表业务代码应该依赖它们的字段和偏移。Apple 在 WWDC20 特别提醒：这些布局会随系统版本改变。正式代码应使用 `class_getName`、`class_getSuperclass`、`class_copyMethodList` 等公开 Runtime API。
 
-前面 `isa_t` 里也出现过一个 `bits`，但两者回答的问题不同：
+#### 先分清两个同名的 bits
 
-| | `isa_t.bits` | `class_data_bits_t.bits` |
+> **此 `bits` 非彼 `bits`**：前面讲对象时，`isa_t` 里也有个 `uintptr_t bits`（isa 那 8 字节本身）。这里类对象的 `bits` 是 `class_data_bits_t`，和它**同名、套路相同（都是"指针+标志位塞进一个字"）、但管的事完全不同**。一路从 isa 看下来到这儿容易卡住，单独拎出来对比一下：
+
+| 维度 | `isa_t.bits`（每个对象都有） | `class_data_bits_t.bits`（只有类对象有） |
 |---|---|---|
-| 属于谁 | 每个普通对象 | 类对象 |
-| 指向什么 | 对象所属的 Class | 类的 `ro` 或 `rw` 数据 |
-| 回答什么 | “这个对象是什么类？” | “这个类有哪些数据？” |
+| 位置 | 对象头那 8 字节 | `objc_class` 第 4 个字段；在本文 objc4-951.1 的 64 位布局里位于 `isa/super/cache` 之后，即偏移 `0x20`（这是私有实现，不是稳定 ABI） |
+| 指针载荷 | **类指针**（arm64e 下还涉及 PAC 签名） | realize 前为 **`class_ro_t *`**，realize 后为 **`class_rw_t *`** |
+| 附加信息 | 引用计数 `extra_rc` + `nonpointer`/`has_assoc`/`weakly_referenced` 等标志 | 低 3 位是 `FAST_IS_SWIFT_LEGACY`、`FAST_IS_SWIFT_STABLE`、`FAST_HAS_DEFAULT_RR`；64 位下另用最高位 `FAST_IS_RW_POINTER` 标记当前是否已经指向 `rw` |
+| 取真身 | 按当前平台的 `ISA_MASK` / PAC 流程取得 **Class / 元类** | 按 `FAST_DATA_MASK` / PAC 流程取得 **`class_ro_t` 或 `class_rw_t`** |
+| 回答的问题 | 这个对象**属于哪个类** | 这个类**有哪些方法/属性/协议** |
 
-一句话概括：**`isa` 负责找到类，类的 `bits` 负责继续找到类数据。**
+到这里先停一下：`isa_t.bits` 解决的是“**对象属于哪个类**”，`class_data_bits_t.bits` 解决的是“**这个类的数据在哪里**”。下面所有的 `ro / rw / rw_ext` 都只属于第二个问题。
 
-#### ro、rw、rw_ext 分别保存什么
+#### 从旧版到新版：先认职责，再看实现
 
-| 结构 | 什么时候出现 | 主要内容 |
-|---|---|---|
-| `class_ro_t` | 编译期生成，随 Mach-O 映射进内存 | 类名、`instanceStart`、`instanceSize`、ivar、原始方法/属性/协议列表 |
-| `class_rw_t` | 类被 realize 时由 Runtime 分配 | 运行期 flags、子类链、`ro_or_rw_ext`；每个已 realize 的类都有一份 |
-| `class_rw_ext_t` | 确实需要扩展数据时按需分配 | Category 或动态添加带来的方法、属性、协议列表，以及 demangled name 等少用字段 |
+下面先看旧版（以 objc4-779.1 及更早版本为例），再看本文使用的新版。放旧版不是为了让你背两套源码，而是因为旧版把 `ro`、方法数组和运行期字段直接铺在 `class_rw_t` 中，更容易看清各自职责；新版主要是在此基础上增加原子访问、PAC，并把少用的可变数据拆进 `class_rw_ext_t`。
 
-前面计算对象大小时用到的 `instanceStart`、`instanceSize`，源头就在 `class_ro_t`。`class_rw_t` 则不重复保存这些编译期信息，它通过 `ro_or_rw_ext` 把只读数据接回来。
+第一次读这些代码只追踪一件事：**类名、实例大小和原始方法列表在 `ro`；运行期状态在 `rw`；需要合并或修改的方法、属性、协议才进入 `rw_ext`。**
 
-![new_class_layout_objc4_818.svg](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/new_class_layout_objc4_818.svg)
-
-#### realizeClass：bits 怎样从 ro 切换到 rw
-
-类第一次真正被 Runtime 使用时会被 realize。`realizeClassWithoutSwift` 的核心动作可以压缩成下面几行：
+##### 旧版：ro 和可变数组直接挂在 rw 上
 
 ```objc
-// objc-runtime-new.mm，正常类分支节选（objc4-951.1）
-auto ro = cls->safe_ro();                        // ① 此时 bits 仍指向 ro
-rw = objc::zalloc<class_rw_t>();                 // ② 分配运行期可写数据
-rw->set_ro(ro);                                  //    让 rw 接回原来的 ro
-rw->flags = RW_REALIZED | RW_REALIZING | isMeta;
-cls->setData(rw);                                // ③ bits 从指向 ro 改为指向 rw
-
-supercls = realizeClassWithoutSwift(...);        // ④ realize 父类和元类
-cls->setSuperclass(supercls);
-cls->initClassIsa(metacls);
-
-methodizeClass(cls, previously);                 // ⑤ 安装列表并处理 Category
-```
-
-这里最容易混淆的是 `data()` 和 `safe_ro()`：
-
-- `data()` 只负责取得 `class_rw_t`，因此只能在 `bits` 已经指向 `rw` 时使用；realize 前调用会触发 `ASSERT(has_rw_pointer())`。
-- `safe_ro()` 在两个阶段都能取得 `class_ro_t`：realize 前直接从 `bits` 取，realize 后通过 `data()->ro()` 取。
-
-接下来 Runtime 还会递归接好父类和元类，并由 `methodizeClass` 处理方法、属性、协议及 Category。单个 `method_t` 的布局和方法查找属于 Part 2，这里只确认这些列表最终挂在类数据后面。
-
-#### 为什么还要拆出 rw_ext：Clean 与 Dirty
-
-`class_ro_t` 通常位于只读的文件映射页。它在运行期不需要修改，页面在内存压力下可以直接丢弃，之后再从文件重新加载，因此通常保持为 Clean Memory。
-
-`class_rw_t` 和 `class_rw_ext_t` 是 Runtime 分配并可能修改的数据，会计入 Dirty Memory。它们不能像干净的文件页一样直接丢弃后重新读取；在 iOS 上，部分匿名页还可能进入内存压缩。详细的页面状态已经在内存系列文章中讲过，这里只保留它与 Runtime 结构拆分的关系。
-
-旧版（以 objc4-779.1 及更早版本为例）把 methods、properties、protocols、demangledName 等字段直接放在每一份 `class_rw_t` 里。下面两张 WWDC 图讲的是同一时代、同一个类的两个时刻：第一张是尚未 realize，第二张是旧版 realize 之后。
-
-**尚未 realize：类数据直接指向 `class_ro_t`。**
-
-![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260802200017950.png)
-
-**旧版 realize 后：分配较大的 `class_rw_t`，其中直接带着可变数组。**
-
-![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260802200031036.png)
-
-问题在于，绝大多数类并不会在运行期修改方法、属性或协议，却都要为这些字段付出 Dirty Memory。Apple 在 WWDC20 给出的测量中，真正需要扩展信息的类约占 10%；拆出按需分配的 `class_rw_ext_t` 后，估算整个系统可节省约 14 MB。Mail 的演示中大约有 9000 份 `class_rw_t`，只有 900 多份需要扩展结构，单个进程约节省 250 KB。**这些是 2020 年用于说明设计收益的样本数据，不是每个 App 的固定结果。**
-
-这项拆分已经出现在 Apple 公开的 objc4-781 源码中；本文则以本机 objc4-951.1 的最终结构为准。现在每个已 realize 的类仍然需要较小的 `class_rw_t`，只有确实需要可变扩展数据时才分配 `class_rw_ext_t`。
-
-#### 进阶：一个 bits 怎样同时放指针和标志位
-
-理解主线并不需要背掩码，只要知道指针按 8 字节对齐后最低三位空闲，Runtime 会复用这些位保存快速标志；在 64 位实现中还使用 `FAST_IS_RW_POINTER` 快速区分当前存的是 `ro` 还是 `rw`：
-
-```objc
-#define FAST_IS_SWIFT_LEGACY  (1UL << 0)
-#define FAST_IS_SWIFT_STABLE  (1UL << 1)
-#define FAST_HAS_DEFAULT_RR   (1UL << 2)
-#define FAST_FLAGS_MASK       0x0000000000000007UL
-#define FAST_IS_RW_POINTER    0x8000000000000000UL
-```
-
-`FAST_DATA_MASK` 用来去掉这些复用位、取得真正的数据指针；具体数值会随真机、模拟器和地址空间布局变化。arm64e 还要在读取或写回指针时处理 PAC，`explicit_atomic` 则保证并发读取不会看见写到一半的值。
-
-把 `class_data_bits_t` 的大量实现细节收起来后，主线其实只剩三个接口：
-
-```objc
+// 旧版 class_data_bits_t：bits 是裸 uintptr_t，无 atomic / 无 ptrauth
 struct class_data_bits_t {
-    explicit_atomic<uintptr_t> bits;
+    // Values are the FAST_ flags above.
+    uintptr_t bits;
+};
 
-    bool has_rw_pointer() const;  // 当前是否已经指向 rw
-    class_rw_t *data() const;     // 只在 realize 后取 rw
-    const class_ro_t *safe_ro() const; // realize 前后都能取 ro
+// 旧版 class_rw_t：ro / methods / properties / protocols 四个「直接内嵌」，还带 version
+struct class_rw_t {
+    uint32_t flags;
+    uint32_t version;
+
+    const class_ro_t *ro;
+
+    method_array_t   methods;
+    property_array_t properties;
+    protocol_array_t protocols;
+
+    Class firstSubclass;
+    Class nextSiblingClass;
+
+    char *demangledName;
+};
+
+// 旧版 class_ro_t：name 是裸 const char*；方法表叫 baseMethodList（+baseMethods() 访问器）；
+//                 baseProtocols/baseProperties 是普通指针；ivarLayout 是独立字段
+struct class_ro_t {
+    uint32_t flags;
+    uint32_t instanceStart;
+    uint32_t instanceSize;
+#ifdef __LP64__
+    uint32_t reserved;
+#endif
+
+    const uint8_t *ivarLayout;
+
+    const char      *name;
+    method_list_t   *baseMethodList;
+    protocol_list_t *baseProtocols;
+    const ivar_list_t *ivars;
+
+    const uint8_t   *weakIvarLayout;
+    property_list_t *baseProperties;
+
+    method_list_t *baseMethods() const {
+        return baseMethodList;
+    }
 };
 ```
 
-> 这些结构、掩码和偏移都属于 Runtime 私有实现，适合用来理解源码，不应成为业务代码依赖的 ABI。正式代码应使用 `class_getName`、`class_getSuperclass`、`class_copyMethodList` 等公开 Runtime API。
+##### 新版入口：class_data_bits_t
+
+看完旧版的直观关系，再看新版 `bits` 怎样保存 `ro` 或 `rw` 指针。下面的 `FAST_*` 掩码负责从同一个机器字里区分真正的地址和附加标志；第一遍只需看懂 `has_rw_pointer()`、`data()`、`safe_ro()` 三个入口。
+
+`bits` 的真身 `class_data_bits_t`（它用到的 `FAST_*` 掩码先列出）：
+```objc
+// objc-runtime-new.h:125（__LP64__） 下面三行是低三位标志
+#define FAST_IS_SWIFT_LEGACY    (1UL<<0)
+#define FAST_IS_SWIFT_STABLE    (1UL<<1)
+#define FAST_HAS_DEFAULT_RR     (1UL<<2)
+
+#if TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR  // 下面这条掩码用来扣出真正的指针地址
+#define FAST_DATA_MASK          0x0f00007ffffffff8UL
+#else
+#define FAST_DATA_MASK          0x0f007ffffffffff8UL
+#endif
+#define FAST_FLAGS_MASK         0x0000000000000007UL   // 取低三位：把最低三位标志抠出来
+#define FAST_IS_RW_POINTER      0x8000000000000000UL   // 快速判断这是 rw 指针而非 ro：realize 前 bits 指向 ro，realize 后指向包装了 ro 的 rw
+```
+```objc
+// objc-runtime-new.h:2364
+struct class_data_bits_t {
+    friend objc_class;
+    explicit_atomic<uintptr_t> bits;   // 存的是 class_ro_t* 或 class_rw_t*（低位塞 FAST_ 标志）
+private:
+    bool getBit(uintptr_t bit) const { return bits.load(std::memory_order_relaxed) & bit; }
+    void setAndClearBits(uintptr_t set, uintptr_t clear);   // 改标志位时带 ptrauth 验签+重签
+    void setBits(uintptr_t set)   { setAndClearBits(set, 0); }
+    void clearBits(uintptr_t clr) { setAndClearBits(0, clr); }
+public:
+    void copyRWFrom(const class_data_bits_t &other);
+    void copyROFrom(const class_data_bits_t &other, bool authenticate);
+
+	// 判断当前bits里是不是 class_rw_t 
+    bool has_rw_pointer() const { return has_rw_pointer(bits.load(std::memory_order_relaxed)); }
+    static bool has_rw_pointer(uintptr_t bits) {
+#if FAST_IS_RW_POINTER
+        return (bool)(bits & FAST_IS_RW_POINTER);
+#else
+        return bits != 0 && (flags(bits) & RW_REALIZED);
+#endif
+    }    // 最高位是 1，说明是rw，如果是 0，存的是ro
+
+    class_rw_t *data() const {       // 取 rw：arm64e 下验签 + FAST_DATA_MASK 抠地址
+        ASSERT(has_rw_pointer());
+        uintptr_t localBits = bits.load(std::memory_order_relaxed);
+        return (class_rw_t *)((uintptr_t)ptrauth_auth_data((class_rw_t *)localBits,
+            CLASS_DATA_BITS_RW_SIGNING_KEY,
+            ptrauth_blend_discriminator(&bits, CLASS_DATA_BITS_RW_DISCRIMINATOR)) & FAST_DATA_MASK);
+    }
+    void setData(class_rw_t *newData);   // 存 rw：FAST_FLAGS_MASK | 新指针 | FAST_IS_RW_POINTER，再签名
+
+    const class_ro_t *safe_ro() const {  // 并发 realize 期间也能安全取 ro
+        uintptr_t bitsValue = bits.load(std::memory_order_relaxed);
+        if (has_rw_pointer(bitsValue)) return data()->ro();
+        return (const class_ro_t *)(/* 验签后 */ bitsValue & FAST_DATA_MASK);
+    }
+
+    static uint32_t flags(uintptr_t bits) {   // flags 在 ro/rw 起始处，直接 strip+mask 读
+        return *(const uint32_t *)((uintptr_t)ptrauth_strip((const uint32_t *)bits,
+                 CLASS_DATA_BITS_RO_SIGNING_KEY) & FAST_DATA_MASK);
+    }
+    uint32_t flags() const { return flags(bits.load(std::memory_order_relaxed)); }
+};
+```
+
+##### class_ro_t：编译期已经确定的内容
+
+先看底下那层 `class_ro_t`——它就是编译期写死、运行期不可变的部分：
+
+![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260602110437370.png)
+
+
+```objc
+// objc-runtime-new.h:1598 —— class_ro_t（编译期只读）
+struct class_ro_t {
+    uint32_t flags;
+    uint32_t instanceStart;
+    uint32_t instanceSize;       // §2 实例大小源头
+#ifdef __LP64__
+    uint32_t reserved;
+#endif
+    union {
+        const uint8_t *ivarLayout;
+        Class nonMetaclass;
+        // 对实例类而言,这里存 `ivarLayout`——描述哪些 ivar 是 strong 引用的位图,供 ARC 在拷贝/释放对象时遍历强引用。对**元类**而言,ivar 布局无意义,于是这块空间被复用为 `nonMetaclass`,反向指回它所对应的实例类。
+    };
+    explicit_atomic<const char *> name;
+    // baseMethods/baseProtocols 用 PointerUnion 包了相对/绝对 + ptrauth 多种表示
+    objc::PointerUnion<method_list_t,   relative_list_list_t<method_list_t>,   ...> baseMethods;
+    objc::PointerUnion<protocol_list_t, relative_list_list_t<protocol_list_t>, ...> baseProtocols;
+    const ivar_list_t *ivars;
+    const uint8_t *weakIvarLayout;
+    objc::PointerUnion<property_list_t, relative_list_list_t<property_list_t>, ...> baseProperties;
+
+    // RO_HAS_SWIFT_INITIALIZER 时才存在
+    _objc_swiftMetadataInitializer _swiftMetadataInitializer_NEVER_USE[0];
+    _objc_swiftMetadataInitializer swiftMetadataInitializer() const;
+    const char *getName() const { return name.load(std::memory_order_acquire); }
+    class_ro_t *duplicate() const;
+};
+```
+
+`§2` 里反复提到的 `instanceSize`、`instanceStart`，源头就在这里。
+`class_rw_t` 由 `objc_class::bits.data()` 取得,它内部再指向 `class_ro_t`。但这里有个关键时间点问题: 类在编译产物里**最初只有 `ro`**,`bits` 里一开始存的其实是 `ro` 指针而非 `rw`（注意：此时还**不能**调用 `data()`——它内部 `ASSERT(has_rw_pointer())` 会失败；要取只读数据得走 `safe_ro()`）。只有当这个类第一次被使用(消息发送、`+alloc` 等)触发 `realizeClassWithoutSwift` 时,runtime 才会分配一个 `class_rw_t`,把 `ro` 塞进去,并回写 `bits`。所以 `class_rw_t` 是"类被实现(realize)"的产物,而 `class_ro_t` 是"类被编译"的产物。
+
+##### class_rw_t：realize 后出现的运行期外壳
+
+因此，下面的 `class_rw_t` 不是和 `ro` 二选一地保存同一套数据。它更像 Runtime 为类加上的一层可写外壳：保留运行期状态和子类链，再通过 `ro_or_rw_ext` 接回原来的 `ro`，或者接到按需创建的 `rw_ext`。
+
+```objc
+// objc-runtime-new.h:2212 —— class_rw_t（运行期可写）
+struct class_rw_t {
+    uint32_t flags;
+    uint16_t witness;
+#if SUPPORT_INDEXED_ISA
+    uint16_t index;
+#endif
+    explicit_atomic<uintptr_t> ro_or_rw_ext;   // 二选一：const class_ro_t* 或 class_rw_ext_t*
+    Class firstSubclass;
+    Class nextSiblingClass;
+
+private:
+    using ro_or_rw_ext_t = objc::PointerUnion<const class_ro_t, class_rw_ext_t,
+                            PTRAUTH_STR("class_ro_t"), PTRAUTH_STR("class_rw_ext_t")>;
+    const ro_or_rw_ext_t get_ro_or_rwe() const { return ro_or_rw_ext_t{ro_or_rw_ext}; }
+    void set_ro_or_rwe(const class_ro_t *ro);
+    void set_ro_or_rwe(class_rw_ext_t *rwe, const class_ro_t *ro);
+    class_rw_ext_t *extAlloc(const class_ro_t *ro, bool deep = false);   // 真要改时才分配 rwe
+
+public:
+    void setFlags(uint32_t set);
+    void clearFlags(uint32_t clear);
+    void changeFlags(uint32_t set, uint32_t clear);
+
+    class_rw_ext_t *ext() const;
+    class_rw_ext_t *extAllocIfNeeded();
+    class_rw_ext_t *deepCopy(const class_ro_t *ro);
+
+    const class_ro_t *ro() const {        // rwe 在就从 rwe 取 ro，否则 ro_or_rw_ext 本身就是 ro
+        auto v = get_ro_or_rwe();
+        if (slowpath(v.is<class_rw_ext_t *>()))  //如果已经升级，那么从rwe里取ro
+            return v.get<class_rw_ext_t *>(&ro_or_rw_ext)->ro;
+        return v.get<const class_ro_t *>(&ro_or_rw_ext);// 不然自己就是ro
+    }
+    void set_ro(const class_ro_t *ro);
+
+    const method_array_t   methods() const;     // rwe 在取 rwe->methods；否则取 ro->baseMethods
+    const property_array_t properties() const;
+    const protocol_array_t protocols() const;
+};
+```
+
+到这里看到的是三个结构的“静态快照”，但还有一个问题没有回答：`bits` 最初指向 `ro`，究竟在哪一刻、通过哪些语句改成指向 `rw`？下面的 `realizeClassWithoutSwift` 就是把这张静态结构图真正执行起来的过程。
+
+#### realizeClass：ro/rw 
+
+前面讲 `bits` 时说过：类在编译产物里**最初只有 `ro`**，`bits` 里一开始存的就是 `ro` 指针；只有第一次被使用（消息发送、`+alloc` 等）才会被 **realize**，把这套数据真正「点亮」、并生出可写的 `rw`。这件事由 `realizeClassWithoutSwift` 完成（`objc-runtime-new.mm:2961`）：
+
+```objc
+// objc-runtime-new.mm:2978 / 2986-2992 / 3117 —— 正常类分支节选
+auto ro = cls->safe_ro();                        // ① 取只读 ro（不是 data()）
+rw = objc::zalloc<class_rw_t>();                 // ② 分配可写 rw
+rw->set_ro(ro);                                  //    把 ro 收进 rw
+rw->flags = RW_REALIZED | RW_REALIZING | isMeta; //    打上「已实现」标志
+cls->setData(rw);                                //    ③ bits 从「指 ro」翻面成「指 rw」
+...
+supercls = realizeClassWithoutSwift(...);        //    递归 realize 父类 / 元类
+cls->setSuperclass(supercls);                    //    回写 superclass
+cls->initClassIsa(metacls);                      //    回写 isa（详见下文 isa 走位）
+...
+methodizeClass(cls, previously);                 // ④ 装方法/属性/协议、合并 category
+```
+
+拆成四步看：
+
+1. **取 `ro`：走 `cls->safe_ro()`，不是 `data()`。** 此刻 `bits` 里压根还没有 `rw`，直接 `data()` 会撞上它内部的 `ASSERT(has_rw_pointer())`（这正是前面 §bits 留的伏笔）。有些老博客把第一步写成「`data()` 把 `rw` 强转成 `ro`」——那是更早版本的说法，951 取只读数据走的是 `safe_ro()`。
+2. **分配 `rw` 并翻面。** `zalloc` 出一个 `class_rw_t`，`set_ro(ro)` 把只读数据收进去，打上 `RW_REALIZED` 标志，再 `setData(rw)` 回写——`bits` 从此**由「指向 `ro`」变成「指向 `rw`」**（低位仍留着那些 `FAST_` 标志）。
+3. **接上继承链。** 递归把父类、元类也 realize，然后回写 `superclass` 和 `isa`。这一步就是「isa 走位图」的接环时刻，留到后面「接环就发生在 realize」那节细看，这里不展开。
+4. **装方法：`methodizeClass`（`:3117`）。** 把 `ro` 里的 `baseMethods` / `baseProperties` / `baseProtocols` 安装好，并把外部 category 合并进来。具体到单个方法长什么样（`method_t` 的 `big` / `small` / `bigSigned` 三种表示，以及 `SEL` / `types` / `IMP`）、消息发送又怎么靠它找到 `IMP`，是 **Part 2** 的主线，这里按下不表。
+
+这里先给 `method_t` 留一个小尾巴，本文暂时不展开这部分细节，Part 2 的方法查找会回到 `method_t`。
+
+
+![new_class_layout_objc4_818.svg](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/new_class_layout_objc4_818.svg)
+
+
+#### rw 的分离：clean memory vs dirty memory
+
+- **Clean Memory** ：被加载后就不会再变化的内存。例如，`class_ro_t`就是 **Clean Memory** ，因为它是只读的。
+ 
+- **Dirty Memory** ：在进程运行时会发生变化的内存。类结构体一旦被使用就是 **Dirty Memory** ，因为运行时会写入新的数据，例如它的方法缓存部分。
+
+- **`class_ro_t` 通常位于 clean、只读的文件映射页**：编译期就定死，系统有内存压力时可以直接丢弃，之后再从文件重新加载；`instanceSize`、`name`、原始方法列表都在这里。
+
+- **`class_rw_t` / `class_rw_ext_t` 是运行期分配并会被修改的数据**：类被 realize 后要维护子类链、合并 Category，动态修改方法、属性、协议时还会用到扩展结构。这些页会计入 dirty memory，不能像 clean 文件页那样直接丢弃后从文件恢复；iOS 还可能对部分匿名页进行内存压缩。
+
+**Dirty Memory** 比 **Clean Memory** 代价更昂贵，因为在进程运行的整个过程中，都需要被保留； **Clean Memory** 则可以为其他事情腾出空间，因为当我们需要时，系统总是可以很容易地从磁盘中重新加载它。
+
+macOS可以通过内存交换来解决内存不足的问题，但iOS不支持这个技术，所以 **Dirty Memory** 的代价会更昂贵。 **Dirty Memory** 就是为什么类结构被分为了这两个部分的原因。当然，如果我们可以拥有更多的 **Clean Memory** ，当然是更好的。把不会改变的数据分离出来，我们就可以让大部分的类数据保持为 **Clean Memory** 。
+
+![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260802210804082.png)
+一旦类被使用，运行时会分配额外的空间来存储这部分数据，即`class_rw_t`，其中 **rw表示read write** 。这个结构体中，我们只存储运行时产生的数据。
+
+苹果在 WWDC2020 给出的设备测量中发现：系统里 `class_rw_t` 一度合计约占 30 MB，但真正需要修改方法等扩展信息的类只有约 10%。把少用字段拆进按需分配的 `class_rw_ext_t` 后，约 90% 的类不需要这份扩展数据，估算可在整个系统节省约 14 MB；现场对 Mail 的演示里，大约 9000 个 `class_rw_t` 中只有 900 多个需要扩展结构，单个进程约省 250 KB。
+
+- **First Subclass** 和 **Next Sibling Class** 指针让运行时可以遍历当前使用的所有类。
+- **Methods** 、 **Properties** 、 **Protocols** ，这部分也是可以在运行时进行修改的。在实践中发现，其实只有大约10%类的方法会发生变化，所以这部分内存可以得到优化，滕出一些空间。
+- **Demangled Name** 只会被Swift类所使用，而且除非有需要获取它们的Objective-C名称，甚至都不会用到。
+
+所以后两个不常用的部分，我们又可以拆分出来：
+
+![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260802210822789.png)
+
+这项拆分从 Apple 公开的 objc4-781 已经出现；本文使用的 objc4-951.1 延续并演进了这套设计，把可变方法、属性、协议数组等少用字段放进**懒分配**的 `class_rw_ext_t`：
+![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260802211647241.png)
+
+
+```objc
+// objc-runtime-new.h:2202 —— 真要动态改时才分配的扩展
+struct class_rw_ext_t {
+    class_ro_t_authed_ptr<const class_ro_t> ro;   // 指回只读 ro（带 ptrauth）
+    method_array_t   methods;      // 可写方法数组（base + category + 动态添加）
+    property_array_t properties;
+    protocol_array_t protocols;
+    const char *demangledName;
+    uint32_t version;
+};
+```
+如果原来的代码直接访问`class_rw_t`结构，由于结构内存布局发生了变化，可能产生崩溃。苹果推荐使用运行时API，这样底层的细节会由他们处理。
+
+![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260802211815208.png)
+
+
+
+上面的正文负责解释每一步为什么存在；下面这张交互图只用来**读完后复盘**三种状态，不需要再从头逐字段学习一次：
+
+![[素材/rw_ro_ext_layout.html]]
+
+#### 还有两块「不弄脏内存」的优化（同属 WWDC2020）
+
+##### 相对方法列表（Relative Method Lists）
+
+![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260802211918227.png)
+
+每个方法包含3个部分的信息。
+
+- 名称，或者选择器，例如`init`。
+- 方法参数类型的编码，例如`@16@0:8`。
+- 方法的IMP，Objective-C方法最终会编译为一个C函数。
+
+这些信息都是指针，在64位的系统上会占用24字节。
+
+![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260802211950582.png)
+我们的方法列表是存在于镜像中的，而镜像的加载位置可能在内存的任何地方，这取决于动态链接器的选择。也就是说，链接器需要解析镜像中的指针，修复它们指向内存真实的的位置。**这部分会产生额外的消耗。
+又由于镜像中的方法都是固定的，不会跑到其他镜像中去。其实我们不需要64位寻址的指针，只需要32位即可。
+![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260802212005354.png)
+
+新版引入 `method_t::small`（`objc-runtime-new.h:975`），换成三个 **32 位相对偏移**（共 12 字节），体积直接减半。
+
+更关键的是：相对偏移按「自身地址 + 偏移」现算，**镜像加载时不需要 rebase（重写指针）**，所以方法列表能继续待在 **clean memory**、随 dyld 共享缓存被多进程共享，更加安全，同时也不会因为 ASLR 重定位而被「弄脏」——和 `ro` 是同一招。承载这种表示的列表类型是 `relative_list_list_t`（`objc-runtime-new.h:1380`）。
+
+> 代价：`int32` 偏移要求方法和它引用的目标落在 ±2GB 内；越界（极少数情况）才回退到绝对指针。
+
+![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260802212849783.png)
+
+如果这部分数据使用了 **Method Swizzling** 呢？
+
+![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260802212938482.png)
+苹果会在一个全局表中映射交换的实现。由于交换并不是非常常见的操作，所以这个全局表也不会特别大。
+
+此外，在以前的实现中，进行方法交换会导致整个分页`Page`变成 **Dirty Memory** 。即仅仅一个交换，就可能造成数千字节的 **Dirty Memory** ，这是很不划算的。
+
+![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260802212956162.png)
+如果我们的代码中直接处理了这些底层细节，但没有处理好的话，可能会造成1个64位的指针去读取2个32位的指针值。这是没有意义的，会造成崩溃。同样，苹果推荐使用运行时API，这样底层的细节会由他们处理。
+
+
+##### 预优化缓存（回到 cache_t）
+
+这一项已经不是 `bits → ro/rw/rw_ext` 的继续，而是回到前面的 `cache_t`。普通方法缓存要等消息第一次走慢速查找后，才把 `SEL → IMP` 写进当前进程的缓存；对于 dyld shared cache 中符合条件的系统类，shared cache builder 可以提前生成一份 `preopt_cache_t`，其中保存部分预构建的 IMP 缓存项。
+
+类刚被 realize 时还必须让消息进入慢速路径，以完成 `+initialize` 的同步。因此 `initializeToEmptyOrPreoptimizedInDisguise()` 并不是直接在“空缓存”和“立即可用的预优化缓存”之间切换：没有可用预优化缓存时它初始化为空；有预优化缓存时，它先把原缓存地址**伪装保存**起来，使其暂时不能正常命中。等类初始化完成后，`maybeConvertToPreoptimized()` 才根据有效性决定正式启用它，或者丢弃并回到空缓存。
 
 # 元类 metaclass
 
@@ -1076,7 +1346,7 @@ bool isMetaClassMaybeUnrealized() const {
 }
 ```
 
-这里的 `bits.flags()` 读取的不是前面说的低三位 `FAST_*`，而是先取得 `bits` 当前指向的 `ro` 或 `rw`，再读取结构开头的 `uint32_t flags`。`class_ro_t` 和 `class_rw_t` 都把这个字段放在偏移 0，而且 `RO_META == RW_META`，所以类即使还没 realize，也能用同一条路径判断自己是不是元类。
+这正好回收了 bits 里那个 `flags()` 的伏笔：**`flags` 之所以放在 `ro`/`rw` 的起始处、能直接 strip+mask 读出，就是为了在类还没 realize 时也能判断它是不是元类。**
 
 ## 类方法，其实就是元类的「实例方法」
 
