@@ -1020,15 +1020,11 @@ struct class_ro_t {
     }
 };
 ```
-
-|                          | 老版（objc4-750 那代）                                                                                                                | 新版 951.1（本文这版）                                                                  |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
-| `class_rw_t` 怎么存方法/属性/协议 | **直接内嵌** `method_array_t methods; property_array_t properties; protocol_array_t protocols; const class_ro_t *ro;`——不管改不改，每个类都背着 | 抽到**懒分配**的 `class_rw_ext_t`，用 `ro_or_rw_ext` 一个联合指针「ro 或 rw_ext 二选一」            |
-| 取只读数据                    | `data()->ro`（`ro` 是字段，直接 `.`）                                                                                                   | `data()->ro()`（`ro()` 是方法，从联合指针里取；realize 后才有 `data()`，未 realize 走 `safe_ro()`） |
-| 内存代价                     | 每个 realize 的类都摊一份完整 rw                                                                                                          | 多数类只指向 ro，不分配 rw_ext，**省 dirty memory**                                         |
+![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260802200017950.png)
+								realize 之后
+![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260802200031036.png)
 
 `bits` 的真身 `class_data_bits_t`（它用到的 `FAST_*` 掩码先列出）：
-
 ```objc
 // objc-runtime-new.h:125（__LP64__） 下面三行是低三位标志
 #define FAST_IS_SWIFT_LEGACY    (1UL<<0)
@@ -1126,7 +1122,7 @@ struct class_ro_t {
 ```
 
 `§2` 里反复提到的 `instanceSize`、`instanceStart`，源头就在这里。
-`class_rw_t` 由 `objc_class::bits.data()` 取得,它内部再指向 `class_ro_t`。但这里有个关键时间点问题:类在编译产物里**最初只有 `ro`**,`bits` 里一开始存的其实是 `ro` 指针而非 `rw`（注意：此时还**不能**调用 `data()`——它内部 `ASSERT(has_rw_pointer())` 会失败；要取只读数据得走 `safe_ro()`）。只有当这个类第一次被使用(消息发送、`+alloc` 等)触发 `realizeClassWithoutSwift` 时,runtime 才会分配一个 `class_rw_t`,把 `ro` 塞进去,并回写 `bits`。所以 `class_rw_t` 是"类被实现(realize)"的产物,而 `class_ro_t` 是"类被编译"的产物。
+`class_rw_t` 由 `objc_class::bits.data()` 取得,它内部再指向 `class_ro_t`。但这里有个关键时间点问题: 类在编译产物里**最初只有 `ro`**,`bits` 里一开始存的其实是 `ro` 指针而非 `rw`（注意：此时还**不能**调用 `data()`——它内部 `ASSERT(has_rw_pointer())` 会失败；要取只读数据得走 `safe_ro()`）。只有当这个类第一次被使用(消息发送、`+alloc` 等)触发 `realizeClassWithoutSwift` 时,runtime 才会分配一个 `class_rw_t`,把 `ro` 塞进去,并回写 `bits`。所以 `class_rw_t` 是"类被实现(realize)"的产物,而 `class_ro_t` 是"类被编译"的产物。
 
 ```objc
 // objc-runtime-new.h:2212 —— class_rw_t（运行期可写）
@@ -1197,7 +1193,7 @@ methodizeClass(cls, previously);                 // ④ 装方法/属性/协议�
 3. **接上继承链。** 递归把父类、元类也 realize，然后回写 `superclass` 和 `isa`。这一步就是「isa 走位图」的接环时刻，留到后面「接环就发生在 realize」那节细看，这里不展开。
 4. **装方法：`methodizeClass`（`:3117`）。** 把 `ro` 里的 `baseMethods` / `baseProperties` / `baseProtocols` 安装好，并把外部 category 合并进来。具体到单个方法长什么样（`method_t` 的 `big` / `small` / `bigSigned` 三种表示，以及 `SEL` / `types` / `IMP`）、消息发送又怎么靠它找到 `IMP`，是 **Part 2** 的主线，这里按下不表。
 
-这里先给 `method_t` 留一个最小定位：老版结构常被写成 `SEL name; const char *types; IMP imp;`。其中 `types` 就是 **Type Encoding**，用一串 C 字符串描述方法返回值和参数类型；`name` 是 selector；`imp` 是真正的函数实现地址。老源码里还会看到按 `SEL` 地址排序的比较器（如 `SortBySELAddress` 一类写法），它服务的是方法列表排序和后续查找。本文暂时不展开这些细节，Part 2 的方法查找会回到 `method_t`。
+这里先给 `method_t` 留一个小尾巴，本文暂时不展开这部分细节，Part 2 的方法查找会回到 `method_t`。
 
 
 ![new_class_layout_objc4_818.svg](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/new_class_layout_objc4_818.svg)
@@ -1205,10 +1201,19 @@ methodizeClass(cls, previously);                 // ④ 装方法/属性/协议�
 
 #### ro 与 rw 的分离：clean memory vs dirty memory
 
-为什么要拆成 `ro` / `rw`，又继续把少用的数据拆到 `rw_ext`？这是新版 runtime 相对老博客**最大的变化**，也是 WWDC2020《Advancements in the Objective-C runtime》的重点。核心是一对内存概念：
+- **Clean Memory** ：被加载后就不会再变化的内存。例如，`class_ro_t`就是 **Clean Memory** ，因为它是只读的。
+ 
+- **Dirty Memory** ：在进程运行时会发生变化的内存。类结构体一旦被使用就是 **Dirty Memory** ，因为运行时会写入新的数据，例如它的方法缓存部分。
 
 - **`class_ro_t` 通常位于 clean、只读的文件映射页**：编译期就定死，系统有内存压力时可以直接丢弃，之后再从文件重新加载；`instanceSize`、`name`、原始方法列表都在这里。
+
 - **`class_rw_t` / `class_rw_ext_t` 是运行期分配并会被修改的数据**：类被 realize 后要维护子类链、合并 Category，动态修改方法、属性、协议时还会用到扩展结构。这些页会计入 dirty memory，不能像 clean 文件页那样直接丢弃后从文件恢复；iOS 还可能对部分匿名页进行内存压缩。
+
+关于这部分clean memory 和 dirty memory的内容，在最开始的iOS内存系列文章中就有过体现，在这里简单带过。
+**Dirty Memory** 比 **Clean Memory** 代价更昂贵，因为在进程运行的整个过程中，都需要被保留； **Clean Memory** 则可以为其他事情滕出空间，因为当我们需要时，系统总是可以很容易地从磁盘中重新加载它。
+
+macOS可以通过内存交换来解决内存不足的问题，但iOS不支持这个技术，所以 **Dirty Memory** 的代价会更昂贵。 **Dirty Memory** 就是为什么类结构被分为了这两个部分的原因。当然，如果我们可以拥有更多的 **Clean Memory** ，当然是更好的。把不会改变的数据分离出来，我们就可以让大部分的类数据保持为 **Clean Memory** 。
+
 
 苹果在 WWDC2020 给出的设备测量中发现：系统里 `class_rw_t` 一度合计约占 30 MB，但真正需要修改方法等扩展信息的类只有约 10%。把少用字段拆进按需分配的 `class_rw_ext_t` 后，约 90% 的类不需要这份扩展数据，估算可在整个系统节省约 14 MB；现场对 Mail 的演示里，大约 9000 个 `class_rw_t` 中只有 900 多个需要扩展结构，单个进程约省 250 KB。**这些是 Apple 在 2020 年用于说明设计收益的样本数据，不是每个 App 或每台设备都固定如此。**
 
@@ -1604,6 +1609,8 @@ LLDB 里可以用 `x` 命令验证这件事：
 20. [Garan no dou - Objective-C 中的类和对象](https://blog.ibireme.com/)
 
 21. [Tenloy's Blog - ObjC Runtime 总结](https://tenloy.github.io/)
+22. 
+23. https://juejin.cn/post/6846687597478019079?searchId=20260802142016822CE31D1CB65C4E568B
 
 ---
 
