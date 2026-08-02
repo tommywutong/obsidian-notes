@@ -165,7 +165,7 @@ public:
 ```
 
 ```cpp
-// ③ objc4-951.7（本文这版）
+// ③ objc4-951.1（本文这版）
 struct objc_object {
 private:
     char  isa_storage[sizeof(isa_t)];        // 退化成「一坨裸字节」
@@ -712,7 +712,7 @@ struct objc_class : objc_object {
 1. **`isa`**（继承自 `objc_object`）→ 指向它的**元类**
 2. **`superclass`** → 它的父类（`NSObject` 的 superclass 为 `nil`，这条链是「继承」的物理体现）
 3. **`cache`** → 方法缓存。一条消息查到对应的实现后，会缓存在这里，下次同样的消息直接命中、跳过慢速查找。
-4. **`bits`** → 类的「数据仓库」。方法列表、属性、协议、成员变量、实例大小……全藏在它身后。
+4. **`bits`** → 类数据的「入口」。它不是直接把方法、属性等内容塞在一个整数里，而是用一根“指针 + 标志位”带我们找到后面的 `class_ro_t`、`class_rw_t`，必要时再找到 `class_rw_ext_t`。
 
 ### superclass：父类指针（arm64e 上同样被签名）
 
@@ -930,34 +930,46 @@ struct cache_t {
 
 ![[素材/cache_t_layout.html]]
 
-### bits ：class_rw_t → class_ro_t
+### bits：类数据的入口（ro → rw → rw_ext）
 
-`bits` 本身只是个包装（`class_data_bits_t`），通过 `data()` 取出真正的数据结构 `class_rw_t`；`class_rw_t` 再通过 `ro()` 拿到 `class_ro_t`。类的数据是**两层**结构：
+先把 `bits` 的角色说准：它本身只是一个 `class_data_bits_t`，内部核心仍是一个机器字大小的 `bits`。这个整数同时承载**类数据指针**和少量**快速标志位**，方法、属性、协议并不直接存放在这 8 字节里。
 
+而且 `bits` 后面的结构不是始终不变的。类刚从 Mach-O 映射进来、尚未被 realize 时，它直接指向编译期生成的 `class_ro_t`；类第一次真正被 Runtime 使用后，Runtime 才分配 `class_rw_t` 并让 `bits` 改为指向它。绝大多数类到这里就够了，只有确实需要合并 Category 或动态修改方法、属性、协议时，才继续按需分配 `class_rw_ext_t`：
+
+```text
+编译产物 / 尚未 realize：
+objc_class.bits ──────────────→ class_ro_t
+
+realize 之后：
+objc_class.bits ─data()───────→ class_rw_t
+                                      │
+                                      ▼
+                               ro_or_rw_ext（二选一）
+                                  ├─通常────→ class_ro_t
+                                  └─需要扩展→ class_rw_ext_t
+                                                ├─ ro ─→ class_ro_t
+                                                ├─ methods
+                                                ├─ properties
+                                                └─ protocols
 ```
-objc_class.bits
-     │ data()
-     ▼
- class_rw_t   （运行期可写，read-write）
-     │ ro()
-     ▼
- class_ro_t   （编译期只读，read-only）
-```
+
+所以不要把它背成固定的“`bits → rw → ro` 两层结构”。更准确的说法是：**`bits` 是会随类的生命周期切换指向的入口；`ro` 始终保存编译期只读数据，`rw` 保存 realize 后的运行期状态，`rw_ext` 只为少数真的需要可变扩展数据的类服务。**
+
+> 这里直接阅读 `objc_class`、`class_rw_t` 等私有结构，是为了理解 Runtime 的实现，不代表业务代码应该依赖它们的字段和偏移。Apple 在 WWDC20 特别提醒：这些布局会随系统版本改变。正式代码应使用 `class_getName`、`class_getSuperclass`、`class_copyMethodList` 等公开 Runtime API。
 
 > **此 `bits` 非彼 `bits`**：前面讲对象时，`isa_t` 里也有个 `uintptr_t bits`（isa 那 8 字节本身）。这里类对象的 `bits` 是 `class_data_bits_t`，和它**同名、套路相同（都是"指针+标志位塞进一个字"）、但管的事完全不同**。一路从 isa 看下来到这儿容易卡住，单独拎出来对比一下：
 
 | 维度 | `isa_t.bits`（每个对象都有） | `class_data_bits_t.bits`（只有类对象有） |
 |---|---|---|
-| 位置 | 对象头那 8 字节 | `objc_class` 第 4 个字段（isa/super/cache 之后，偏移 0x20） |
-| 高位存 | **类指针**（arm64e 为 `shiftcls_and_sig`，类指针+PAC签名） | **`class_rw_t *`**（realize 前是 `class_ro_t *`） |
-| 其余位存 | 引用计数 `extra_rc` + `nonpointer`/`has_assoc`/`weakly_referenced` 等标志 | 低 3 位 `FAST_FLAGS`：`FAST_IS_SWIFT_LEGACY/STABLE`、`FAST_IS_RW_POINTER` |
-| 取真身的掩码 | `ISA_MASK` = `0x007ffffffffffff8`（arm64e） | `FAST_DATA_MASK` = `0x0f007ffffffffff8`（arm64） |
-| 抠出来是 | `isa.bits & ISA_MASK` → **Class / 元类** | `bits & FAST_DATA_MASK` → **`class_rw_t`** |
+| 位置 | 对象头那 8 字节 | `objc_class` 第 4 个字段；在本文 objc4-951.1 的 64 位布局里位于 `isa/super/cache` 之后，即偏移 `0x20`（这是私有实现，不是稳定 ABI） |
+| 指针载荷 | **类指针**（arm64e 下还涉及 PAC 签名） | realize 前为 **`class_ro_t *`**，realize 后为 **`class_rw_t *`** |
+| 附加信息 | 引用计数 `extra_rc` + `nonpointer`/`has_assoc`/`weakly_referenced` 等标志 | 低 3 位是 `FAST_IS_SWIFT_LEGACY`、`FAST_IS_SWIFT_STABLE`、`FAST_HAS_DEFAULT_RR`；64 位下另用最高位 `FAST_IS_RW_POINTER` 标记当前是否已经指向 `rw` |
+| 取真身 | 按当前平台的 `ISA_MASK` / PAC 流程取得 **Class / 元类** | 按 `FAST_DATA_MASK` / PAC 流程取得 **`class_ro_t` 或 `class_rw_t`** |
 | 回答的问题 | 这个对象**属于哪个类** | 这个类**有哪些方法/属性/协议** |
 
-总而言之：**`isa.bits` 指向"类型"**（对象→类→元类，纵向的类型归属）；**`class.bits` 指向"内容"**（类→rw→ro，横向的成员数据）。运行时先靠 `isa.bits` 找到"我是哪个类"，再用那个类的 `class.bits` 找到"这个类装了什么"，一个接力一个。注意两者掩码高位形态不同（`0x0f00…` vs `0x007f…`）——因为 `class.bits` 还要在高位留 Swift 标志，两个 `bits` 不能共用同一个 mask。
+总而言之：**`isa.bits` 指向“类型”**（对象→类→元类，纵向的类型归属）；**`class.bits` 指向“类数据”**（类→ro，或类→rw→ro/ext，横向的成员数据）。运行时先靠 `isa` 找到“我是哪个类”，再从那个类的 `class.bits` 找到“这个类装了什么”，一个接力一个。两者虽然都用了位复用，但字段含义、掩码和 PAC 处理各自独立，不能拿同一套位布局相互套用；尤其要注意，`class.bits` 的两个 Swift 标志在**低位**，`FAST_IS_RW_POINTER` 才位于 64 位值的最高位。
 
-先看旧版（objc4-750~781 那代）这三件套长什么样，再逐个看新版：
+先看旧版（objc4-750~781 ）什么样，再逐个看新版：
 
 ```objc
 // 旧版 class_data_bits_t：bits 是裸 uintptr_t，无 atomic / 无 ptrauth
@@ -1009,7 +1021,7 @@ struct class_ro_t {
 };
 ```
 
-|                          | 老版（objc4-750 那代）                                                                                                                | 新版 951.7（本文这版）                                                                  |
+|                          | 老版（objc4-750 那代）                                                                                                                | 新版 951.1（本文这版）                                                                  |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
 | `class_rw_t` 怎么存方法/属性/协议 | **直接内嵌** `method_array_t methods; property_array_t properties; protocol_array_t protocols; const class_ro_t *ro;`——不管改不改，每个类都背着 | 抽到**懒分配**的 `class_rw_ext_t`，用 `ro_or_rw_ext` 一个联合指针「ro 或 rw_ext 二选一」            |
 | 取只读数据                    | `data()->ro`（`ro` 是字段，直接 `.`）                                                                                                   | `data()->ro()`（`ro()` 是方法，从联合指针里取；realize 后才有 `data()`，未 realize 走 `safe_ro()`） |
@@ -1029,7 +1041,7 @@ struct class_ro_t {
 #define FAST_DATA_MASK          0x0f007ffffffffff8UL
 #endif
 #define FAST_FLAGS_MASK         0x0000000000000007UL   // 取低三位：把最低三位标志抠出来
-#define FAST_IS_RW_POINTER      0x8000000000000000UL   // 快速判断这是 rw 指针而非 ro，未realiz时候，bits指向ro，realize后，Runtime生产rw 里面包装ro
+#define FAST_IS_RW_POINTER      0x8000000000000000UL   // 快速判断这是 rw 指针而非 ro：realize 前 bits 指向 ro，realize 后指向包装了 ro 的 rw
 ```
 ```objc
 // objc-runtime-new.h:2364
@@ -1193,12 +1205,14 @@ methodizeClass(cls, previously);                 // ④ 装方法/属性/协议�
 
 #### ro 与 rw 的分离：clean memory vs dirty memory
 
-为什么要分成 `ro` / `rw` 两层？这是新版 runtime 相对老博客**最大的变化**，也是 WWDC2020《Advancements in the Objective-C runtime》的重点。核心是一对内存概念：
+为什么要拆成 `ro` / `rw`，又继续把少用的数据拆到 `rw_ext`？这是新版 runtime 相对老博客**最大的变化**，也是 WWDC2020《Advancements in the Objective-C runtime》的重点。核心是一对内存概念：
 
-- **`class_ro_t` = clean memory（干净内存）**：编译期就定死、运行期只读。它可以在进程间**共享**、能被系统按需换出/换入（page in/out），**不占用宝贵的 dirty memory**。`instanceSize`、`name`、原始方法列表都在这。
-- **`class_rw_t` = dirty memory（脏内存）**：类一旦被 realize（运行期初始化），就需要一块可写的数据来合并 Category 方法、支持 `class_addMethod` 动态加方法、维护子类链。dirty memory 不能共享、不能换出，是实打实的内存开销。
+- **`class_ro_t` 通常位于 clean、只读的文件映射页**：编译期就定死，系统有内存压力时可以直接丢弃，之后再从文件重新加载；`instanceSize`、`name`、原始方法列表都在这里。
+- **`class_rw_t` / `class_rw_ext_t` 是运行期分配并会被修改的数据**：类被 realize 后要维护子类链、合并 Category，动态修改方法、属性、协议时还会用到扩展结构。这些页会计入 dirty memory，不能像 clean 文件页那样直接丢弃后从文件恢复；iOS 还可能对部分匿名页进行内存压缩。
 
-苹果统计发现：**绝大多数类，运行期根本不会去改方法 / 属性 / 协议列表。** 给它们都分配一份内嵌了三个数组的完整 `rw`，太浪费。WWDC2020 给过实测数据：运行期真正会改方法 / 属性 / 协议的类**只占约 10%**，只给这部分类分配 `class_rw_ext_t`、其余直接指向 `ro`，**全系统省下约 14MB 脏内存**。于是新版（818 起）把那三个可变数组抽到一个**懒分配**的 `class_rw_ext_t` 里：
+苹果在 WWDC2020 给出的设备测量中发现：系统里 `class_rw_t` 一度合计约占 30 MB，但真正需要修改方法等扩展信息的类只有约 10%。把少用字段拆进按需分配的 `class_rw_ext_t` 后，约 90% 的类不需要这份扩展数据，估算可在整个系统节省约 14 MB；现场对 Mail 的演示里，大约 9000 个 `class_rw_t` 中只有 900 多个需要扩展结构，单个进程约省 250 KB。**这些是 Apple 在 2020 年用于说明设计收益的样本数据，不是每个 App 或每台设备都固定如此。**
+
+于是新版（objc4-818 起）把可变方法、属性、协议数组等少用字段抽到一个**懒分配**的 `class_rw_ext_t` 里：
 
 ```objc
 // objc-runtime-new.h:2202 —— 真要动态改时才分配的扩展
@@ -1216,7 +1230,7 @@ struct class_rw_ext_t {
 
 #### 还有两块「不弄脏内存」的优化（同属 WWDC2020）
 
-clean / dirty 这条思路在 951.7 里不止用在 `ro`，还有两处也值得一提：
+clean / dirty 这条思路在 951.1 里不止用在 `ro`，还有两处也值得一提：
 
 ##### 相对方法列表（Relative Method Lists）
 
@@ -1555,39 +1569,41 @@ LLDB 里可以用 `x` 命令验证这件事：
 
 3. [WWDC 2020 - Advancements in the Objective-C runtime](https://developer.apple.com/videos/play/wwdc2020/10163/)
 
-4. [Mike Ash - Friday Q&A 2009-03-20: Objective-C Messaging](https://www.mikeash.com/pyblog/friday-qa-2009-03-20-objective-c-messaging.html)
+4. [掘金 - WWDC20 iOS14 Runtime 优化 1：Class 结构体变化](https://juejin.cn/post/6846687597478019079)
 
-5. [Mike Ash - Friday Q&A 2017-06-30: Dissecting objc_msgSend on ARM64](https://www.mikeash.com/pyblog/friday-qa-2017-06-30-dissecting-objc_msgsend-on-arm64.html)
+5. [Mike Ash - Friday Q&A 2009-03-20: Objective-C Messaging](https://www.mikeash.com/pyblog/friday-qa-2009-03-20-objective-c-messaging.html)
 
-6. [Cocoa Samurai - Understanding the Objective-C Runtime](https://cocoasamurai.blogspot.com/2010/01/understanding-objective-c-runtime.html)
+6. [Mike Ash - Friday Q&A 2017-06-30: Dissecting objc_msgSend on ARM64](https://www.mikeash.com/pyblog/friday-qa-2017-06-30-dissecting-objc_msgsend-on-arm64.html)
 
-7. [Always Processing - Objective-C Internals](https://alwaysprocessing.blog/series/objc-internals)
+7. [Cocoa Samurai - Understanding the Objective-C Runtime](https://cocoasamurai.blogspot.com/2010/01/understanding-objective-c-runtime.html)
 
-8. [sunnyxx - 重识 Objective-C Runtime](https://blog.sunnyxx.com/2016/08/13/reunderstanding-runtime-0/)
+8. [Always Processing - Objective-C Internals](https://alwaysprocessing.blog/series/objc-internals)
 
-9. [sunnyxx - 神经病院 Objective-C Runtime 入院第一天](https://blog.sunnyxx.com/2014/11/06/runtime-nuts/)
+9. [sunnyxx - 重识 Objective-C Runtime](https://blog.sunnyxx.com/2016/08/13/reunderstanding-runtime-0/)
 
-10. [sunnyxx - objc category 的秘密](https://blog.sunnyxx.com/2014/03/05/objc_category_secret/)
+10. [sunnyxx - 神经病院 Objective-C Runtime 入院第一天](https://blog.sunnyxx.com/2014/11/06/runtime-nuts/)
 
-11. [Draveness - 深入解析 ObjC 中方法的结构](https://draveness.me/method-struct/)
+11. [sunnyxx - objc category 的秘密](https://blog.sunnyxx.com/2014/03/05/objc_category_secret/)
 
-12. [WWDC 2013 Session 404 - Advances in Objective-C](https://nonstrict.eu/wwdcindex/wwdc2013/404/)
+12. [Draveness - 深入解析 ObjC 中方法的结构](https://draveness.me/method-struct/)
 
-13. [Greg Parker - Classes and metaclasses](https://sealiesoftware.com/blog/archive/2009/04/14/objc_explain_Classes_and_metaclasses.html)
+13. [WWDC 2013 Session 404 - Advances in Objective-C](https://nonstrict.eu/wwdcindex/wwdc2013/404/)
 
-14. [Draveness - 对象是如何初始化的（iOS）](https://draven.co/object-init/)
+14. [Greg Parker - Classes and metaclasses](https://sealiesoftware.com/blog/archive/2009/04/14/objc_explain_Classes_and_metaclasses.html)
 
-15. [Draveness - 你真的了解 load 方法么？](https://draveness.me/load/)
+15. [Draveness - 对象是如何初始化的（iOS）](https://draven.co/object-init/)
 
-16. [Draveness - 关联对象 AssociatedObject 完全解析](https://draveness.me/ao/)
+16. [Draveness - 你真的了解 load 方法么？](https://draveness.me/load/)
 
-17. [BOB's Blog - Objective-C Runtime 相关优化与底层分析](https://blog.devtang.com/)
+17. [Draveness - 关联对象 AssociatedObject 完全解析](https://draveness.me/ao/)
 
-18. [bestswifter - 深入理解 Objective-C Runtime](https://github.com/bestswifter/blog/blob/master/articles/objc-runtime.md)
+18. [BOB's Blog - Objective-C Runtime 相关优化与底层分析](https://blog.devtang.com/)
 
-19. [Garan no dou - Objective-C 中的类和对象](https://blog.ibireme.com/)
+19. [bestswifter - 深入理解 Objective-C Runtime](https://github.com/bestswifter/blog/blob/master/articles/objc-runtime.md)
 
-20. [Tenloy's Blog - ObjC Runtime 总结](https://tenloy.github.io/)
+20. [Garan no dou - Objective-C 中的类和对象](https://blog.ibireme.com/)
+
+21. [Tenloy's Blog - ObjC Runtime 总结](https://tenloy.github.io/)
 
 ---
 
