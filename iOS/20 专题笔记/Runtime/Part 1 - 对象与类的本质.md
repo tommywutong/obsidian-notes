@@ -465,11 +465,128 @@ isa_t::getClass(MAYBE_UNUSED_AUTHENTICATED_PARAM bool authenticated) const {
 这个设计不是凭空出现的。2013 年，苹果在 iPhone 5s / A7 把 iOS 带进 64 位时代后，指针从 4 字节变成 8 字节，`NSNumber`、`NSDate` 这类小对象如果仍然都走堆分配，内存压力会被放大。WWDC 2013 Session 404《Advances in Objective-C》里就专门讲过 Tagged Pointer：把小值直接塞进指针后，典型收益可以概括成三点：相关对象内存占用下降、访问更快、创建销毁成本大幅降低。老资料里常引用的量级是：内存约省一半、访问约快 3 倍、创建销毁约快 100 倍。
 
 
-对一个 `NSNumber *n = @5` 这种**又小又高频**的值类型来说，为了一个 `5` 去 `malloc` 一块堆内存、维护 `isa`、再管引用计数，实在太奢侈。Tagged Pointer 的思路很直接：**干脆不分配内存，把「类型标记 + 数据本身」直接塞进那 8 字节的指针里。** 这个「指针」根本不指向任何地址，**它本身就是数据**——`@5` 里的 `5`，就藏在这根「指针」的二进制位里。
+对一个 `NSNumber *n = @5` 这种**又小又高频**的值类型来说，为了一个 `5` 去 `malloc` 一块堆内存、维护 `isa`、再管引用计数，实在太奢侈。Tagged Pointer 的思路很直接：**不再把这 8 字节只当成普通对象地址，而是拿其中一些位保存类型，剩余位置保存 Payload。** 对最常见的小数值来说，Payload 就是数据本身；在后来引入的特定格式中，Payload 也可能承载一个指向常量数据的指针。无论哪一种，它都不能被当成“指向普通 Objective-C 对象本体的地址”直接解引用。
 
 ![Snapzy_2026-08-03_00-31-48_022.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/Snapzy_2026-08-03_00-31-48_022.png)
 ![Snapzy_2026-08-03_00-32-28_628.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/Snapzy_2026-08-03_00-32-28_628.png)
 ![Snapzy_2026-08-03_00-32-45_054.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/Snapzy_2026-08-03_00-32-45_054.png)
+
+### Payload、Tag 与 Extended Tag
+
+这三张图都是把一个 64 位的值从 `bit63` 画到 `bit0`：**左边是最高位，右边是最低位**。图中字段的位置会随着架构和系统版本变化，但每一版都在回答相同的三个问题：
+#### Payload：这个值真正携带的内容
+
+`Payload` 通常翻译为**载荷**。它是扣除标志位、基础 Tag 和可能存在的 Extended Tag 后，剩下用来表达对象内容的那些位。
+例如一个足够小的 `NSNumber`，概念上可以理解为：
+
+```text
+[ Tagged Pointer 标志 ][ NSNumber 的 Tag ][ 数字 5 的 Payload ]
+```
+
+Runtime 先根据 Tag 找到 `NSNumber` 对应的 Class；之后由这个类的实现解释 Payload，最终让它表现得像一个能够响应 `integerValue`、`description` 等消息的对象。也就是说，Runtime 只提供“识别 Tagged Pointer、找到 Class、取出 Payload”的通用机制，**Payload 的具体编码含义由对应类型决定**：数字可以保存数值位，日期可以保存时间信息，字符串则可能采用自己的字符编码方案。
+
+基础格式通常可以提供 **60 位 Payload**。这不等于所有类型都能无条件使用完整的 60 位：具体类型还可能把其中一些位拿去表达符号、长度或编码方式。某个值装不下时，也不会强行截断，而是退回普通对象表示。
+
+在当前 arm64 的 Split Tagged Pointer 方案中，还有一部分特殊的扩展类型允许 Payload 承载一个对齐后的普通指针，用来引用常量字符串或其他常量数据。这里保存的是“常量数据的地址”，但整个 Tagged Pointer 仍然不是普通 Objective-C 对象本体的地址，不能跳过 Runtime 直接把它当成对象解引用。
+
+#### Tag：告诉 Runtime“我应该表现成哪一类对象”
+
+基础 `Tag` 是一个较小的类型编号。三位一共能表达 `0...7` 八种状态，但其中 `7` 通常被保留为“这是扩展格式”的入口，因此基础格式实际使用 `0...6` 表示普通 Tag。
+
+```text
+基础 Tag 不是 Class 指针
+        ↓
+它只是一个很小的整数索引
+        ↓
+Runtime 用它查询 Tagged Pointer 类表
+        ↓
+得到真正的 Class
+```
+
+可以把它近似理解成：
+
+```text
+tag = 3
+    ↓
+objc_tag_classes[3]
+    ↓
+NSNumber 对应的 Class
+```
+
+因此，“Tagged Pointer 没有 `isa`”不等于它没有类型。普通对象通过对象本体开头的 `isa` 找到 Class；Tagged Pointer 则从自身位模式中取出 Tag，再去 Runtime 的类表中找到 Class。
+
+Tag 的具体编号属于私有实现，可能随着平台和系统版本变化。源码中的枚举可以帮助理解当前实现，但业务代码不能因为某一版中 `3` 对应 `NSNumber`，就自行截取位并把 `3` 永久写死。
+
+#### Extended Tag：基础 Tag 不够用时的二级类型编号
+
+三位基础 Tag 能容纳的类型非常有限。为了支持更多种类，Runtime 把基础 Tag 的一个值——通常是 `7`，也就是二进制 `111`——定义为**转义标记**：它不直接代表某个 Foundation 类型，而是告诉 Runtime“继续读取旁边额外的 8 位”。这 8 位就是 `Extended Tag`。
+
+```text
+基础格式：
+基础 Tag != 111
+→ 直接使用基础 Tag 查类表
+→ 通常保留 60 位 Payload
+
+扩展格式：
+基础 Tag == 111
+→ 再读取 8 位 Extended Tag
+→ 使用扩展 Tag 查另一张类表
+→ 通常剩下 52 位 Payload
+```
+
+所以 `Extended` 的含义是“**扩展了可表示的类型数量**”，不是“扩展了 Payload”。它恰好相反：为了多保存 8 位类型编号，Payload 会从基础格式的 60 位缩小到 52 位。这是一笔很直观的交换：
+
+```text
+基础 Tag：类型少，Payload 大
+扩展 Tag：类型多，Payload 小
+```
+
+8 位 Extended Tag 理论上提供 256 个槽位，但这不代表系统一定注册或公开使用了全部槽位。哪些类型能采用 Tagged Pointer、使用基础格式还是扩展格式，都由 Apple 的 Runtime 和 Foundation 实现决定。
+
+#### 三张图为什么把这些字段画在不同位置
+
+三张图展示的是同一套思想在不同时代的排列方式，而不是三种同时使用的对象类型：
+
+```text
+Intel 旧方案（从 bit63 到 bit0）：
+[ Payload 60 位 ][ 基础 Tag 3 位 ][ 标志位 1 位 ]
+
+arm64、iOS 14 以前：
+[ 标志位 1 位 ][ 基础 Tag 3 位 ][ Payload 60 位 ]
+
+arm64、iOS 14 起的 Split Tagged Pointer：
+[ 标志位 1 位 ][ Payload 60 位 ][ 基础 Tag 3 位 ]
+```
+
+当基础 Tag 为 `111`、进入扩展格式后，对应关系是：
+
+```text
+Intel 旧方案：
+[ Payload 52 位 ][ Extended Tag 8 位 ][ 111 ][ 标志位 ]
+
+arm64、iOS 14 以前：
+[ 标志位 ][ 111 ][ Extended Tag 8 位 ][ Payload 52 位 ]
+
+arm64、iOS 14 起：
+[ 标志位 ][ Extended Tag 8 位 ][ Payload 52 位 ][ 111 ]
+```
+
+arm64 把 Tagged Pointer 标志留在 `bit63`，是为了让 `objc_msgSend` 用一次有符号比较同时筛出两种少见情况：`nil` 等于零，而最高位为 1 的 Tagged Pointer 看作有符号整数时小于零；正常对象地址则大于零。这样最常见的普通对象可以尽快进入读取 `isa` 的路径。
+
+iOS 14 又把三位基础 Tag 移到低位，是因为按 8 字节对齐的普通指针低三位天然为零，正好可以利用；扩展 Tag 则放进 arm64 的高位区域，配合 Top Byte Ignore 等平台能力。这样既保留了 `bit63` 对消息发送的快速判断，又让部分扩展格式的 52 位 Payload 能容纳一个对齐后的常量数据指针。
+
+```text
+先看标志位，识别 Tagged Pointer
+        ↓
+读取基础 Tag
+        ↓
+若基础 Tag 为 111，再读取 Extended Tag
+        ↓
+根据 Tag 查询 Class
+        ↓
+由对应类型解释 Payload
+```
+
 
 
 ### 判定一个指针是不是 Tagged Pointer
