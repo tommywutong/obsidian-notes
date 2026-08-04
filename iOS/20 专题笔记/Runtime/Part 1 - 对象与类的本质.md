@@ -58,7 +58,7 @@ typedef struct objc_object   *id;      // id    = 指向 objc_object 的指针
 typedef struct objc_selector *SEL;     // SEL   = 指向 objc_selector 的指针
 ```
 
-也就是说，一个 OC 对象的指针，本质上就是指向一块堆内存的指针，这块内存的开头是一个 `objc_object` 结构体。在新版本 runtime（objc4）里，`objc_object` 长这样：
+也就是说，对于普通的堆对象，OC 对象指针本质上就是一块对象内存的地址，这块内存的开头由 `objc_object` 描述。很多旧版 Runtime 资料会把它简化成下面这样：
 
 ```
 struct objc_object {
@@ -72,6 +72,7 @@ public:
 
 我们首先打开源码工程
 这里是入口：他说明OC对象底层至少有一个isa，isa用来找到对象对应的类
+
 ```objective-C
 /// Represents an instance of a class.
 struct objc_object {
@@ -124,80 +125,62 @@ public:
 
 ![CleanShot 2026-05-30 at 13.17.22@2x.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/CleanShot%202026-05-30%20at%2013.17.22%402x.png)
 
-在看新版之前，先把旧版长什么样摆出来对比。这个结构其实经历了三个时代：
+很多老博客展示的是旧版 `objc-private.h` 中的内部实现：
 
 ```cpp
-// ① 古早版（objc4-750 及更早，sunnyxx / draveness 那批老博客里的样子）
+// objc4-756.2、objc4-818 等旧版内部实现
 struct objc_object {
-    isa_t isa;        // public：外部能直接 obj->isa 摸到
+private:
+    isa_t isa;
 };
 ```
 
-```cpp
-// ② objc4-818
-struct objc_object {
-private:
-    isa_t isa;        // 已经 private，但仍是一个「有类型的 isa_t 成员」
-
-public:
-    // —— 取 / 初始化 / 修改 isa ——
-    Class ISA(bool authenticated = false);   // 非 tagged 对象取类（强制走方法）
-    Class rawISA();                          // 取原始 isa（非 nonpointer）
-    Class getIsa();                          // 允许 tagged pointer 对象
-    uintptr_t isaBits() const;
-    void initIsa(Class cls);                 // 新对象初始化 isa
-    void initInstanceIsa(Class cls, bool hasCxxDtor);
-    void initClassIsa(Class cls);
-    void initProtocolIsa(Class cls);
-    Class changeIsa(Class newCls);           // 改已存在对象的 isa
-
-    // —— 一批基于 isa 的判定 ——
-    bool hasNonpointerIsa();
-    bool isTaggedPointer();
-    bool isClass();
-    bool hasCxxDtor();
-
-    // —— 以下省略一大簇 ——
-    // hasAssociatedObjects / isWeaklyReferenced / retain / release /
-    // rootRetain / rootRelease / rootDealloc / sidetable_* …… 引用计数、
-    // 关联对象、weak、dealloc，留到 Part 3 / 候选 Part 5 再展开。
-};
-```
+而 objc4-951.1 的内部实现变成了：
 
 ```cpp
-// ③ objc4-951.1（本文这版）
 struct objc_object {
 private:
-    char  isa_storage[sizeof(isa_t)];        // 退化成「一坨裸字节」
-    isa_t &isa() { return *reinterpret_cast<isa_t *>(isa_storage); }  // 只能借方法戴上 isa_t 这副眼镜
+    char isa_storage[sizeof(isa_t)];
+
+    isa_t &isa() {
+        return *reinterpret_cast<isa_t *>(isa_storage);
+    }
+
 public:
     Class ISA(bool authenticated = false) const;
 };
 ```
 
-我们可以看到， isa_storage是真正存isa的地方。旧版本的写法是直接暴露 `isa_t isa` 作为 public 成员，任何人都能直接读写。新版本改成：`char isa_storage[sizeof(isa_t)];` 使用一个 char 数组来占位。arm64e上，isa里面那根指针是被签名过的，如果有一个公开有类型的 isa_t  isa，外部代码就能直接obj->isa.cls直接摸到那根带签名的指针
-——读出来是“看着像乱码”的值，甚至可能绕过验证。修改后，想要接触这8个字节都要经过isa()访问器，isa_t里面的 cls又被设置为private，因此你必须`getClass()/setClass()`
+这两种写法看起来不同，描述的却仍是对象开头的同一个机器字。假设 `sizeof(isa_t) == 8`，旧版的 `isa_t isa` 和新版的 `char isa_storage[8]` 都只占 8 字节，后面的实例变量位置并没有因此改变。
 
-- `char` 在 C++ 标准里是"字节类型"，用它做原始存储是合法的 type-punning，不触发 UB（Undefined Behavior）。直接在 union 成员之间互相访问在 C++ 里有严格限制，但通过 `char[]` 中转是标准允许的。
+`reinterpret_cast` 也不会再创建或复制一个 `isa_t`。它只是让 Runtime 在需要操作这 8 个字节时，临时把它们按照 `isa_t` 来解释：
 
-- `char[]` 不会触发任何构造函数或析构函数。`isa_t` 是一个 union，如果直接作为成员，某些编译器版本可能对 union 成员的初始化有额外的限制，而 `char[]` 完全透明、惰性，什么都不做。
-
-- 给对象内部开一块内存，大小刚好等于isa_t，所以实际的内存布局也没有变化
-
-总的来说，这是一次**封装重构**，内存布局和 isa_t 的位域语义完全没变，只是把裸字段换成了私有字节数组 + 私有访问器，防止外部绕过 Runtime 直接操作 isa，同时避免 C++ union 直接访问的潜在 UB 问题。
-
-再回头看这两行，其实它们都指向同一个地方：
-
-```cpp
-isa_t &isa() { return *reinterpret_cast<isa_t *>(isa_storage); }  // 内部访问
-Class ISA(bool authenticated = false) const;                     // 对外取类
+```text
+对象开头的同一组 8 字节
+    ├── 存储时：char isa_storage[8]
+    └── Runtime 内部访问时：isa_t
 ```
 
-不管是内部用的 `isa()`，还是对外的 `ISA()`，它们去读那 8 个裸字节时，都是指的同一个——`isa_t`。换句话说，`objc_object` 这个壳本身没几两肉，它把「对象到底属于哪个类、引用计数是多少、有没有关联对象、是否被弱引用」这些信息，**全都打包压进了 `isa_t` 这 8 个字节里**。
+因此，这里主要是**源码表示和访问方式的变化**，不是对象模型变了，也不是 `isa` 又多了一层指针。新版把有类型的存储隐藏起来，Runtime 内部再通过 `isa()`、`getClass()`、`setClass()` 等受控入口访问；这也便于统一处理 non-pointer isa、原子操作以及 arm64e 上的 Pointer Authentication。
+
+还要区分两份头文件：公开的 `objc.h` 为了声明 `id` 等类型，仍能看到 `Class isa`；Runtime 真正的内部实现则位于 `objc-private.h`。所以不能把公开头文件里的兼容声明和内部结构的演变混成“public → private → 字节数组”三个时代。
+
+再回头看下面两个名字，它们的层级并不相同：
+
+```cpp
+isa_t &isa();                                  // 把原始存储解释成 isa_t
+Class ISA(bool authenticated = false) const;   // 从 isa 信息中取得 Class
+```
+
+`isa()` 是低层的内部访问器，返回的是 `isa_t` 引用；`ISA()` 则继续解析其中的信息，最终得到对象所属的 `Class`。二者最终读取的是同一块对象头内存，但返回的内容不是一回事。
+
+这里讨论的是普通对象。Tagged Pointer 的值直接编码在指针中，并没有真正的对象内存，自然也没有这块 `isa_storage`；Runtime 需要通过允许处理 Tagged Pointer 的 `getIsa()` 走另一条路径。
+
+至此，`objc_object` 本身只为对象头中的 isa 信息保留了一个机器字。至于类指针、状态标志和部分引用计数怎样共同放进这个机器字，就要继续看 `isa_t`。
 
 ![[素材/isa_storage_to_isa_t_steps.html]]
-
 所以「对象的本质是什么」这个问题，到这里就收敛成了：`isa_t` 里到底装了什么？
+
 ## isa_t
 
 ```objc
@@ -247,7 +230,6 @@ ISA_BITFIELD struct ：同一块 8 字节按「位」拆开，摊成 `nonpointe
 >用一个例子来解释这个union： 假设这块 8 字节内存里存的是 0x011d800100000001
 >用bits 读：isa.bits == 0x011d800100000001 就是一个普通的64位整数，没有任何结构 拿来做位运算；用cls读 isa.cls == 0x011d800100000001 把同一个数字当成一个内存地址，认为它指向某个 Class 对象。用 匿名 struct 解读：把同一个数字按 bit 切开，每段单独看；
 
-> 也就是说，内存本身没有类型，字节本身从来没有变过，变的只是你怎么解读他
 
 ![[素材/isa_t_three_views.html]]
 
@@ -309,17 +291,13 @@ uintptr_t extra_rc          : 7;    // bit25-31 内联引用计数
 
 ![[素材/isa_t-四套架构位布局对照（可切换）.html]]
 
-这里顺手补一个老版 Runtime 里很经典的问题：为什么字段叫 `shiftcls`，而且旧源码里经常能看到类似 `isa.shiftcls = (uintptr_t)cls >> 3` 的写法？
+这里补一个老版 Runtime 里很经典的问题：为什么字段叫 `shiftcls`，而且旧源码里经常能看到类似 `isa.shiftcls = (uintptr_t)cls >> 3` 的写法？
 
 原因是 **Class 指针按 8 字节对齐**。8 字节就是 `2^3`，所以合法类对象地址的最低 3 位恒为 0。既然这 3 位没有携带有效地址信息，就可以在存进位域前右移 3 位，把高位地址压进更短的 `shiftcls` 字段；取出来时再左移 3 位还原。换句话说，`shiftcls` 不是随便截断指针，而是利用了内存对齐带来的低位空洞。
 
 现代 arm64e 上这一段变成了 `shiftcls_and_sig`：它不再只是“右移后的类指针”，还要和 PAC 签名合在同一段位域里。所以老博客里 `shiftcls >> 3` 的解释适合帮助理解 nonpointer isa 的压缩思路，但不能直接套到 arm64e 的最新布局上。
 
 ### arm64e 的 PAC 指针签名（Pointer Authentication）
-
-上面 ① arm64e 那段 `shiftcls_and_sig : 52` 里的 **`_and_sig`**，就是这一节的主角——**PAC 签名**。它是理解「为什么 arm64e 的 isa 和别的架构长得不一样」的最后一块拼图。
-
-**它要解决什么**：攻击者拿到内存写权限后，最爱**篡改指针**（把 isa、函数指针、返回地址改成自己布置的地址）来劫持控制流。CPU 解引用时分不清「这指针是程序写的，还是被人改的」。PAC 是 **ARMv8.3-A 的硬件特性**（苹果 A12 / arm64e 起启用），思路一句话：**给指针盖一个"防伪钢印"，用之前先验章，章不对就崩。**
 
 **原理**：64 位指针其实没用满（用户态地址只用低 ~40 位），PAC 就把空闲的高位拿来存一段签名：
 
@@ -343,7 +321,7 @@ uintptr_t extra_rc          : 7;    // bit25-31 内联引用计数
 ptrauth_blend_discriminator(obj, ISA_SIGNING_DISCRIMINATOR)  // 把 0x6AE1 和「对象自己的地址 obj」混在一起
 ```
 
-→ **签名同时绑定了"isa 这个用途"和"这个对象的地址"**。所以攻击者**没法把 A 对象的合法签名 isa 整段拷到 B 对象头上**——地址变了，验签必败。
+→ **签名同时绑定了"isa 这个用途"和"这个对象的地址"**。所以攻击者**没法把 A 对象的合法签名 isa 整段拷到 B 对象头上**
 
 PAC 不只用在 isa，Runtime 把同一套机制盖在了一批关键指针上，每处用**不同的盐**做用途隔离：
 
@@ -354,12 +332,9 @@ PAC 不只用在 isa，Runtime 把同一套机制盖在了一批关键指针上�
 | 方法 `IMP` / 缓存 `bucket_t` | 方法/缓存各自的盐 | `cache_t` / `bucket_t::encodeImp` |
 | 类数据 `class_rw_t *`（`bits` 里） | `CLASS_DATA_BITS_RW_DISCRIMINATOR` | `## bits` 的 `data()` 验签 |
 
-> PAC 正好把前面那三个bits、cls、ISA_BITFIELD struct 的取舍讲透了——
 > ① **`cls` 为什么是 `private`**：因为 arm64e 上 isa 里的类指针**带签名**，直接 `isa.cls` 读出来是"带章的乱码"，不能当地址用，只能走 `getClass`/`setClass` 让访问器去验签/签名。
 > ② **签名存在哪**：就压在**位域**的 `shiftcls_and_sig` 高位里（类指针在低位、签名在高位，合成一段 52 位）。这也是 818 起 `shiftcls` 必须扩成 52 位、`ISA_MASK` 加宽到 `0x007ffffffffffff8` 的根因。
 > ③ **不验签时怎么取类**：用 **`bits` ** `& ISA_MASK`（或 `objc_debug_isa_class_mask`）把签名位直接 strip 掉拿地址——快，但不防篡改。
-
-而**下一节的 `getClass`它那个 `if (authenticated) { …auth… } else { …strip… }` 分叉，正是在"安全验签"和"图快 strip"之间做选择。
 
 ### isa 位域的历史演进（2015 → 至今）
 
@@ -393,26 +368,21 @@ uintptr_t has_sidetable_rc:1; extra_rc:8;
 // ISA_MASK 0x007ffffffffffff8；magic / deallocating / has_cxx_dtor 三个老字段全部消失
 ```
 
-把演进归一下，真正的拐点只有三个：
-
-| 拐点 | 版本 | 变了什么 |
-|---|---|---|
-| 命名 + 拆文件 | 680 → 750 | 首位 `indexed` 改名 `nonpointer`；位域从 objc-private.h 抽到独立的 `isa.h`（`ISA_BITFIELD` 宏） |
+| 拐点              | 版本            | 变化                                                                                                                                                                                                                                                                  |
+| --------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 命名 + 拆文件        | 680 → 750     | 首位 `indexed` 改名 `nonpointer`；位域从 objc-private.h 抽到独立的 `isa.h`（`ISA_BITFIELD` 宏）                                                                                                                                                                                     |
 | **arm64e 签名合并** | **781 → 818** | `shiftcls:33` → `shiftcls_and_sig:52`（类指针并入 PAC 签名）；**砍掉 `magic`**、**砍掉 `deallocating`**（改由 `extra_rc==0 && has_sidetable_rc==0` 算出）、`has_cxx_dtor` 移出位域到 cache flags；`ISA_MASK` 由 `0x...0ffffffff8` 加宽到 `0x007ffffffffffff8`；`extra_rc` 从 19 位缩到 8 位（位都让给 52 位签名了） |
-| 封装收口 | 818 → 951 | `objc_object` 不再直接放 `isa_t`，改成 `char isa_storage[]` + `isa()` 访问器；成员方法批量加 `const`；RC 宏改为从 `RC_HAS_SIDETABLE_BIT` 派生；新增分平台的 `ISA_MASK_NOSIG`（位域本身不变） |
+| 封装收口            | 818 → 951     | `objc_object` 不再直接放 `isa_t`，改成 `char isa_storage[]` + `isa()` 访问器；成员方法批量加 `const`；RC 宏改为从 `RC_HAS_SIDETABLE_BIT` 派生；新增分平台的 `ISA_MASK_NOSIG`（位域本身不变）                                                                                                                 |
 
 ![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260603170233955.png)
 老isa图⬆️
 
-一句话记忆：**老博客那张 isa 图（`shiftcls:33`/`magic`/`deallocating`）一直用到 781；分水岭是 781↔818，arm64e 上为了塞进 PAC 签名，一口气合并了 `shiftcls` 并删掉了 `magic`、`deallocating` 两个字段。** 而 781 之前五年（680→781）arm64 布局几乎没动过
+**老博客那张 isa 图（`shiftcls:33`/`magic`/`deallocating`）一直用到 781；分水岭是 781↔818，arm64e 上为了塞进 PAC 签名，一口气合并了 `shiftcls` 并删掉了 `magic`、`deallocating` 两个字段。** 而 781 之前五年（680→781）arm64 布局几乎没动过
 
 ![[素材/isa-evolution.html]]
-
 > 注意：上面的对照只针对 **arm64e**。同一份 818/951 源码里，arm64（非 e）、x86_64 分支仍保留着 `magic` / `has_cxx_dtor`（见前一节的 ②③），所以「老字段消失」只发生在开了指针签名的 arm64e 上。
 
 ### getClass：从 isa 里取出 Class
-
-刚才我们了解了，isa_t 长什么样、位怎么分布，接下来我们看看 Runtime是怎么从isa_t 里拿到 Class 的？
 
 ```objc
 // 从 isa 里把 Class 指针抠出来。authenticated 决定要不要做 PAC 指针认证：
@@ -543,8 +513,6 @@ Tag 的具体编号属于私有实现，可能随着平台和系统版本变化�
 
 8 位 Extended Tag 理论上提供 256 个槽位，但这不代表系统一定注册或公开使用了全部槽位。哪些类型能采用 Tagged Pointer、使用基础格式还是扩展格式，都由 Apple 的 Runtime 和 Foundation 实现决定。
 
-#### 三张图为什么把这些字段画在不同位置
-
 三张图展示的是同一套思想在不同时代的排列方式，而不是三种同时使用的对象类型：
 
 ```text
@@ -590,8 +558,6 @@ iOS 14 又把三位基础 Tag 移到低位，是因为按 8 字节对齐的普�
 
 
 ### 判定一个指针是不是 Tagged Pointer
-
-判定逻辑只有一行（`objc-internal.h`）：
 
 ```objc
 static inline bool
