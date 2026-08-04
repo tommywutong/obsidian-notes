@@ -1080,7 +1080,7 @@ objc_class.bits ─data()───────→ class_rw_t
 
 > 这里直接阅读 `objc_class`、`class_rw_t` 等私有结构，是为了理解 Runtime 的实现，不代表业务代码应该依赖它们的字段和偏移。Apple 在 WWDC20 特别提醒：这些布局会随系统版本改变。正式代码应使用 `class_getName`、`class_getSuperclass`、`class_copyMethodList` 等公开 Runtime API。
 
-#### 先分清两个同名的 bits
+#### 两个同名的 bits
 
 > 前面讲对象时，`isa_t` 里也有个 `uintptr_t bits`（isa 那 8 字节本身）。这里类对象的 `bits` 是 `class_data_bits_t`，和它**同名、套路相同（都是"指针+标志位塞进一个字"）、但管的事完全不同**。一路从 isa 看下来到这儿容易卡住，单独拎出来对比一下：
 
@@ -1392,7 +1392,7 @@ struct class_rw_ext_t {
 
 ![[素材/rw_ro_ext_layout.html]]
 
-#### 还有两块「不弄脏内存」的优化（同属 WWDC2020）
+#### 另外两个的优化（同属 WWDC2020）
 
 ##### 相对方法列表（Relative Method Lists）
 
@@ -1493,7 +1493,7 @@ Class getMeta() const {
 
 类的 `isa` 指向元类，元类的 `isa` 又指向谁？元类有没有父类？把这两条链走完，就是经典的「isa 走位图」。
 
-## 接环就发生在 realize
+##  realize
 
 类加载时，`isa`（指向元类）和 `superclass`（指向父类）这两根指针，是在 `realizeClassWithoutSwift` 里回写的：
 
@@ -1516,7 +1516,7 @@ bool isRootMetaclass() const { return ISA() == (Class)this; }     // 根元类�
 ```
 
 
-### 实测：真实地址把这张图跑通
+### 实测：真实地址跑通
 
 > 同一个 `isa_walk.m`，`Dog : Animal : NSObject` 三层继承，用 `object_getClass` / `class_getSuperclass` 逐层打印（地址为某次运行实测值）：
 
@@ -1544,20 +1544,25 @@ Animal 元类.superclass      0x1f6e35bb0   → 根元类
 1. **`根元类.isa (0x1f6e35bb0) == 根元类自身 (0x1f6e35bb0)`** —— isa 链到根元类就咬住自己，不再往上。
 2. **`根元类.superclass (0x1f6e35bd8) == NSObject 类 (0x1f6e35bd8)`** —— 元类的 superclass 链不是断在根元类，而是拐回 `NSObject` 类，再由它 `superclass=nil` 收尾。
 
-## isKindOfClass / isMemberOfClass
+## 类型、继承与 Runtime 查询方法
+
+
+### 一：判断对象或类的关系
+
+#### isKindOfClass / isMemberOfClass
 
 `isKindOfClass:` / `isMemberOfClass:`，底层就是顺着 `superclass` 链、isa 和元类链在走。源码只有几行（`NSObject.mm:2450`）：
 
 ```objc
-+ (BOOL)isMemberOfClass:(Class)cls { return self->ISA() == cls; }   // 类方法版：比 isa（元类）
-- (BOOL)isMemberOfClass:(Class)cls { return [self class] == cls; }  // 实例版：比 class
++ (BOOL)isMemberOfClass:(Class)cls { return self->ISA() == cls; }   
+- (BOOL)isMemberOfClass:(Class)cls { return [self class] == cls; }  
 
-+ (BOOL)isKindOfClass:(Class)cls {                                  // 类方法版
++ (BOOL)isKindOfClass:(Class)cls {                                  
     for (Class tcls = self->ISA(); tcls; tcls = tcls->getSuperclass())
         if (tcls == cls) return YES;
     return NO;
 }
-- (BOOL)isKindOfClass:(Class)cls {                                  // 实例版
+- (BOOL)isKindOfClass:(Class)cls {                                  
     for (Class tcls = [self class]; tcls; tcls = tcls->getSuperclass())
         if (tcls == cls) return YES;
     return NO;
@@ -1568,7 +1573,7 @@ Animal 元类.superclass      0x1f6e35bb0   → 根元类
 - `self->ISA()`：类方法里的 `self` 是**类对象**，它的 `isa` 指向**元类**。所以 `Person` 调 `self->ISA()` 拿到的是 `Person 元类`，不是 `Person` 类——这就是 `+` 版和 `-` 版结果分叉的根。
 - `getSuperclass()`：往上走一层父类。注意元类也有自己的继承链，和类的继承链平行：`Person 元类 → NSObject 元类 → NSObject 类`（根元类的 superclass 拐回根类）。
 
-四个方法逐个看。
+---
 
 **① `- isMemberOfClass:`（实例）** 就一次全等 `[self class] == cls`，不找父类。问的是「你是不是*正好*这个类的实例」。
 
@@ -1626,117 +1631,245 @@ BOOL objc_opt_isKindOfClass(id obj, Class otherClass) {
 
 只要这个类没重写过 NSObject 的核心方法（`hasCustomCore()` 为假），判定就被内联成一段裸 C 循环直接爬完 `superclass` 链，连消息都不发——和前面 cache 那套「热路径少绕一层」是一个意思。
 
-## self 与 super：[self class] 和 [super class] 为什么都打印 Son
+#### isSubclassOfClass
 
-再看一道老题。`Son` 继承 `Father`，在 `Son` 的 `init` 里打印两行：
+四个 `isKindOfClass:` / `isMemberOfClass:` 后，再补一个更适合判断类继承关系的方法：`+isSubclassOfClass:`（`NSObject.mm:2472`）。
 
 ```objc
-@implementation Son : Father
-- (id)init {
-    self = [super init];
-    if (self) {
-        NSLog(@"%@", NSStringFromClass([self class]));   // 输出？
-        NSLog(@"%@", NSStringFromClass([super class]));  // 输出？
++ (BOOL)isSubclassOfClass:(Class)cls {
+    for (Class tcls = self; tcls; tcls = tcls->getSuperclass()) {
+        if (tcls == cls) return YES;
     }
-    return self;
+    return NO;
 }
+```
+
+它从 `self` 这个**普通类对象**开始，沿普通类的 `superclass` 链向上走，不会先跳到元类：
+
+```objc
+@interface Animal : NSObject
 @end
+
+@interface Dog : Animal
+@end
+
+[Dog isSubclassOfClass:[Dog class]];       // YES
+[Dog isSubclassOfClass:[Animal class]];    // YES
+[Dog isSubclassOfClass:[NSObject class]];  // YES
+[Animal isSubclassOfClass:[Dog class]];    // NO
 ```
 
-直觉容易答「Son、Father」。其实两行都是 `Son`。要讲清，得先分清 `self` 和 `super`。
-
-- **`self` 是方法的隐藏参数。** 每个方法被调用时，编译器都偷偷塞了两个参数：`self`（消息接收者）和 `_cmd`（SEL）。`[self class]` 编译成 `objc_msgSend(self, @selector(class))`——`self` 既是接收者，也是方法查找的起点（从 `self` 的类开始找）。`objc_msgSend` 的完整机制是 Part 2 的主角，这里只用到「接收者 + 查找起点」这一层。
-- **`super` 不是参数，是个编译器指示符。** 它告诉编译器：这条消息的方法查找**从父类开始**，但接收者**仍然是 `self`**。所以 `[super class]` 不走 `objc_msgSend`，走的是它的变体 `objc_msgSendSuper2`。
-
-`objc_msgSendSuper2` 的第一个参数是个 `objc_super` 结构体（`message.h:34`）：
+名字虽然叫 `isSubclassOfClass:`，但它把**同一个类**也算进去，因为第一轮比较的就是 `self`。如果要判断“严格子类”，还得排除两者相等的情况：
 
 ```objc
-struct objc_super {
-    id    receiver;     // 接收者——还是 self（son）
-    Class super_class;  // 方法查找的起点
-};
+BOOL isStrictSubclass =
+    Dog.class != Animal.class &&
+    [Dog isSubclassOfClass:Animal.class];
 ```
 
-编译器为 `[super …]` 生成的是 `objc_msgSendSuper2`，不是公开头文件里那个 `objc_msgSendSuper`。两者复用同一个结构体，但第二个字段的含义不一样——`objc-abi.h:237` 写得很清楚：
+五个方法放在一起看：
+
+| 方法 | receiver | 从哪里开始 | 实际在问什么 |
+| --- | --- | --- | --- |
+| `-isMemberOfClass:` | 实例 | `[self class]`，只比较一次 | 对象是否正好属于目标类 |
+| `-isKindOfClass:` | 实例 | `[self class]`，沿普通类继承链 | 对象是否属于目标类或其子类 |
+| `+isMemberOfClass:` | 类对象 | `self->ISA()`，只比较一次 | 该类对象的元类是否正好等于目标 Class |
+| `+isKindOfClass:` | 类对象 | `self->ISA()`，沿元类链 | 该类对象在元类关系中是否命中目标 Class |
+| `+isSubclassOfClass:` | 类对象 | `self`，沿普通类继承链 | 该类是否等于或继承自目标类 |
+
+最常用的其实只有下面三种写法：
 
 ```objc
-// objc_msgSendSuper2() takes the current search class, not its superclass.
-objc_msgSendSuper2(struct objc_super *super, SEL op, ...);
+[dog isMemberOfClass:Dog.class];           // 精确判断对象类型
+[dog isKindOfClass:Animal.class];          // 判断对象所属的继承体系
+[Dog isSubclassOfClass:Animal.class];      // 判断两个类的继承关系
 ```
 
-也就是说，编译器填进 `super_class` 的其实是**当前类 `Son`**，由 `objc_msgSendSuper2` 在运行时**自己取一次 `Son` 的 superclass（`Father`）**当查找起点。为什么不直接填父类？把「取 superclass」留到运行时做，才好配合继承关系的动态变化。
-
-接下来是题眼。不管走 `objc_msgSend` 还是 `objc_msgSendSuper2`，**接收者 `receiver` 自始至终都是 `self`（这个 son 实例）**；`super` 改变的只是**从哪个类开始找 `class` 这个方法**：
-
-- `[self class]`：从 `Son` 开始找 `class`。
-- `[super class]`：从 `Father` 开始找 `class`。
-
-但 `Son`、`Father` 都没重写 `class`，最终都落到 `NSObject` 那唯一一份实现（`NSObject.mm:2438`）：
+尤其不要用 `[Dog isKindOfClass:...]` 代替 `isSubclassOfClass:`。前者从 Dog 元类开始走，后者才是从 Dog 类开始走：
 
 ```objc
-- (Class)class { return object_getClass(self); }
+[Dog isKindOfClass:Dog.class];        // NO
+[Dog isSubclassOfClass:Dog.class];    // YES
 ```
 
-它返回的是 `object_getClass(self)`，而这里的 `self` 就是传进来的 `receiver`，也就是 son 实例。所以两次调用，`object_getClass(self)` 拿到的都是 son 的类——`Son`。
+objc4 源码里紧接着还有一个 `+isAncestorOfObject:`   
 
-总而言之：`super` 只换了**方法查找的起点**，没换 **receiver**；而 `class` 又只认 `object_getClass(self)`，所以 `[self class]` 和 `[super class]` 殊途同归，都打印 `Son`。
+```objc
++ (BOOL)isAncestorOfObject:(NSObject *)obj {
+    for (Class tcls = [obj class]; tcls; tcls = tcls->getSuperclass()) {
+        if (tcls == self) return YES;
+    }
+    return NO;
+}
+```
 
-# Runtime 入院题
+它相当于从另一个方向问“当前类是不是这个对象所属类的祖先”。不过它没有出现在当前公开的 `NSObject.h` 中，业务代码不要调用；这里只把它当成阅读源码时对照 `isSubclassOfClass:` 的一块拼图。
 
-附上一篇博客，这部分直接阅读原文即可：[sunnyxx《神经病院 objc runtime 入院考试》](https://blog.sunnyxx.com/2014/11/06/runtime-nuts/)
+### 二：取得类、父类和元类
+
+这一组不是返回 YES/NO，而是把关系图中的某个节点直接取出来。
+
+| API                        | 返回内容                         |
+| -------------------------- | ---------------------------- |
+| `[obj class]`              | 对象对外报告的类                     |
+| `[SomeClass class]`        | 类对象自己                        |
+| `[obj superclass]`         | `[obj class]` 的父类            |
+| `[SomeClass superclass]`   | 这个类的父类                       |
+| `object_getClass(obj)`     | 沿 `obj` 的 isa 关系走一步          |
+| `class_getSuperclass(cls)` | 沿传入 Class 的 `superclass` 走一步 |
+| `class_isMetaClass(cls)`   | 判断传入的 Class 是不是元类            |
+
+把实例、类和元类放在一起跑一次：
+
+```objc
+Dog *dog = [Dog new];
+
+[dog class];                              // Dog 类
+object_getClass(dog);                     // Dog 类
+
+[Dog class];                              // Dog 类
+object_getClass([Dog class]);             // Dog 元类
+
+class_getSuperclass([Dog class]);         // Animal 类
+class_getSuperclass(object_getClass(Dog.class));
+                                           // Animal 元类
+
+class_isMetaClass(Dog.class);             // NO
+class_isMetaClass(object_getClass(Dog.class));
+                                           // YES
+```
+
+一句话记忆：
+
+```text
+object_getClass       沿 isa 关系走一步
+class_getSuperclass   沿 superclass 关系走一步
+class_isMetaClass     判断当前节点是不是元类
+```
+
+`[obj class]` 和 `object_getClass(obj)` 对普通 NSObject 实例通常得到相同结果，但两者并不保证永远相同。`[obj class]` 是一次 Objective-C 消息发送，类可以重写 `-class`，向外隐藏自己的真实动态类型；`object_getClass(obj)` 是 Runtime C API，直接取得 Runtime 当前使用的类。KVO 动态子类就是理解这种区别的经典场景。
+
+如果手里只有类名，还可以反向查找：
+
+```objc
+Class cls1 = NSClassFromString(@"Dog");
+Class cls2 = objc_getClass("Dog");
+Class meta = objc_getMetaClass("Dog");
+```
+
+`NSClassFromString` 使用 `NSString`，更符合 Foundation 日常写法；`objc_getClass` 使用 C 字符串；`objc_getMetaClass` 则直接返回对应的元类。
+
+### 三：判断方法和协议能力
+
+知道“它是什么类”不等于知道“它能不能响应某个方法”。后一种问题应该使用 `respondsToSelector:`。
+
+```objc
+[dog respondsToSelector:@selector(run)];
+// 当前 dog 实例能不能响应 -run
+
+[Dog respondsToSelector:@selector(sharedInstance)];
+// Dog 类对象能不能响应 +sharedInstance
+
+[Dog instancesRespondToSelector:@selector(run)];
+// Dog 创建出来的实例能不能响应 -run，不需要先创建 dog
+```
+
+这里最容易混淆的是后两句：
+
+| 写法 | 检查谁 | 通常对应 |
+| --- | --- | --- |
+| `[Dog respondsToSelector:@selector(foo)]` | Dog 类对象 | `+foo` |
+| `[Dog instancesRespondToSelector:@selector(foo)]` | Dog 的实例 | `-foo` |
+
+判断协议则使用 `conformsToProtocol:`：
+
+```objc
+[dog conformsToProtocol:@protocol(NSCopying)];
+[Dog conformsToProtocol:@protocol(SomeProtocol)];
+```
+
+它判断的是类及其继承链中有没有声明遵守这个协议，不等同于“逐个验证协议方法是否都有实现”。因此下面两个问题不能互相替代：
+
+```objc
+[dog conformsToProtocol:@protocol(SomeProtocol)];
+[dog respondsToSelector:@selector(requiredMethod)];
+```
+
+前者问协议关系，后者问某一个 selector 当前能否被响应。
+
+### 四：直接取得方法实现 IMP
+
+再往底层一步，不只问“能不能响应”，还可以直接取得 selector 对应的方法实现地址：
+
+```objc
+IMP imp1 = [dog methodForSelector:@selector(run)];
+IMP imp2 = [Dog instanceMethodForSelector:@selector(run)];
+```
+
+| 方法 | 含义 |
+| --- | --- |
+| `-methodForSelector:` | 取得当前对象响应这个 selector 时使用的 IMP |
+| `+instanceMethodForSelector:` | 取得这个类的实例方法对应的 IMP |
+
+`IMP` 本质上是函数指针。拿到它以后可以绕开普通消息发送直接调用，但必须转换成与方法返回值、参数完全匹配的函数指针类型；类型写错就是未定义行为。这里先知道它们位于“selector → IMP”这条链上即可，具体的方法查找、缓存和 IMP 调用放到 Part 2。
+
+最后按问题选 API：
+
+| 手里的问题 | 应该选什么 |
+| --- | --- |
+| 对象是不是正好这个类 | `isMemberOfClass:` |
+| 对象是不是这个类或其子类的实例 | `isKindOfClass:` |
+| 一个类是否等于或继承自另一个类 | `isSubclassOfClass:` |
+| 对象或类能不能响应某个方法 | `respondsToSelector:` |
+| 某个类的实例能不能响应某个方法 | `instancesRespondToSelector:` |
+| 是否声明遵守某个协议 | `conformsToProtocol:` |
+| 想沿 isa 走一步 | `object_getClass` |
+| 想沿父类链走一步 | `class_getSuperclass` |
+| 想拿到最终实现地址 | `methodForSelector:` / `instanceMethodForSelector:` |
+
+# Runtime题目
+
+
+这部分直接阅读原文即可：
+
+- [sunnyxx《神经病院 objc runtime 入院考试》](https://blog.sunnyxx.com/2014/11/06/runtime-nuts/)
+- [Halfrost《神经病院 Objective-C Runtime 入院第一天——isa 和 Class》](https://halfrost.com/objc_runtime_isa_class/)
 
 
 # At Last
 
 ## 参考与感谢
 
-本文在学习和整理 Objective-C Runtime 相关内容时，参考了以下优秀资料，在此表示感谢：
+本文在学习和整理 Objective-C Runtime 相关内容时，主要参考了下面这些资料，在此向原作者致谢。
 
-1. [Apple Developer Documentation - Objective-C Runtime](https://developer.apple.com/documentation/objectivec/objective-c-runtime)
 
-2. [Apple Open Source - objc4 Runtime Source Code](https://opensource.apple.com/source/objc4/)
+- [Apple Developer Documentation：Objective-C Runtime](https://developer.apple.com/documentation/objectivec/objective-c-runtime)
+- [Apple Objective-C Runtime Programming Guide（归档文档）](https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/ObjCRuntimeGuide/Introduction/Introduction.html)
+- [Apple 官方开源仓库：objc4](https://github.com/apple-oss-distributions/objc4)
+- [WWDC 2020：Advancements in the Objective-C runtime](https://developer.apple.com/videos/play/wwdc2020/10163/)
+- [WWDC 2013 Session 404：Advances in Objective-C](https://nonstrict.eu/wwdcindex/wwdc2013/404/)
+- [Halfrost：神经病院 Objective-C Runtime 入院第一天——isa 和 Class](https://halfrost.com/objc_runtime_isa_class/)
+- [Greg Parker：Classes and metaclasses](https://sealiesoftware.com/blog/archive/2009/04/14/objc_explain_Classes_and_metaclasses.html)
+- [Matt Gallagher：What is a meta-class in Objective-C?](https://www.cocoawithlove.com/2010/01/what-is-meta-class-in-objective-c.html)
+- [ibireme：Objective-C 中的类和对象](https://blog.ibireme.com/2013/11/25/objc-object/)
+- [唐巧：Objective-C 对象模型及应用](https://blog.devtang.com/2013/10/15/objective-c-object-model/)
+- [掘金：WWDC20 iOS 14 Runtime 优化 1——Class 结构体变化](https://juejin.cn/post/6846687597478019079)
+- [Always Processing：Objective-C Internals 系列](https://alwaysprocessing.blog/series/objc-internals)
+- [Draveness：深入解析 ObjC 中方法的结构](https://draveness.me/method-struct/)
+- [Draveness：对象是如何初始化的（iOS）](https://draven.co/object-init/)
+- [Mike Ash：Objective-C Messaging](https://www.mikeash.com/pyblog/friday-qa-2009-03-20-objective-c-messaging.html)
+- [Mike Ash：Dissecting objc_msgSend on ARM64](https://www.mikeash.com/pyblog/friday-qa-2017-06-30-dissecting-objc_msgsend-on-arm64.html)
+- [Cocoa Samurai：Understanding the Objective-C Runtime](https://cocoasamurai.blogspot.com/2010/01/understanding-objective-c-runtime.html)
+- [玉令天下：Objective-C Runtime](https://yulingtianxia.com/blog/2014/11/05/objective-c-runtime/)
+- [sunnyxx：objc category 的秘密](https://blog.sunnyxx.com/2014/03/05/objc_category_secret/)
+- [Draveness：你真的了解 load 方法么？](https://draveness.me/load/)
+- [Draveness：关联对象 AssociatedObject 完全解析](https://draveness.me/ao/)
+- [sunnyxx：重识 Objective-C Runtime——Smalltalk 与 C 的融合](https://blog.sunnyxx.com/2016/08/13/reunderstanding-runtime-0/)
+- [sunnyxx：神经病院 objc runtime 入院考试](https://blog.sunnyxx.com/2014/11/06/runtime-nuts/)
+- [bestswifter：深入理解 Objective-C Runtime](https://github.com/bestswifter/blog/blob/master/articles/objc-runtime.md)
+- [Tenloy：Objc Runtime 总结](https://tenloy.github.io/2020/10/28/runtime-data-structure.html)
 
-3. [WWDC 2020 - Advancements in the Objective-C runtime](https://developer.apple.com/videos/play/wwdc2020/10163/)
-
-4. [掘金 - WWDC20 iOS14 Runtime 优化 1：Class 结构体变化](https://juejin.cn/post/6846687597478019079)
-
-5. [Mike Ash - Friday Q&A 2009-03-20: Objective-C Messaging](https://www.mikeash.com/pyblog/friday-qa-2009-03-20-objective-c-messaging.html)
-
-6. [Mike Ash - Friday Q&A 2017-06-30: Dissecting objc_msgSend on ARM64](https://www.mikeash.com/pyblog/friday-qa-2017-06-30-dissecting-objc_msgsend-on-arm64.html)
-
-7. [Cocoa Samurai - Understanding the Objective-C Runtime](https://cocoasamurai.blogspot.com/2010/01/understanding-objective-c-runtime.html)
-
-8. [Always Processing - Objective-C Internals](https://alwaysprocessing.blog/series/objc-internals)
-
-9. [sunnyxx - 重识 Objective-C Runtime](https://blog.sunnyxx.com/2016/08/13/reunderstanding-runtime-0/)
-
-10. [sunnyxx - 神经病院 objc runtime 入院考试](https://blog.sunnyxx.com/2014/11/06/runtime-nuts/)
-
-11. [sunnyxx - objc category 的秘密](https://blog.sunnyxx.com/2014/03/05/objc_category_secret/)
-
-12. [Draveness - 深入解析 ObjC 中方法的结构](https://draveness.me/method-struct/)
-
-13. [WWDC 2013 Session 404 - Advances in Objective-C](https://nonstrict.eu/wwdcindex/wwdc2013/404/)
-
-14. [Greg Parker - Classes and metaclasses](https://sealiesoftware.com/blog/archive/2009/04/14/objc_explain_Classes_and_metaclasses.html)
-
-15. [Draveness - 对象是如何初始化的（iOS）](https://draven.co/object-init/)
-
-16. [Draveness - 你真的了解 load 方法么？](https://draveness.me/load/)
-
-17. [Draveness - 关联对象 AssociatedObject 完全解析](https://draveness.me/ao/)
-
-18. [BOB's Blog - Objective-C Runtime 相关优化与底层分析](https://blog.devtang.com/)
-
-19. [bestswifter - 深入理解 Objective-C Runtime](https://github.com/bestswifter/blog/blob/master/articles/objc-runtime.md)
-
-20. [Garan no dou - Objective-C 中的类和对象](https://blog.ibireme.com/)
-
-21. [Tenloy's Blog - ObjC Runtime 总结](https://tenloy.github.io/)
-22. 
-23. https://juejin.cn/post/6846687597478019079?searchId=20260802142016822CE31D1CB65C4E568B
-24. https://github.com/Biscoffee/apple-docs-vault/blob/agent/reader-navigation-r01/blogs/zh/cocoawithlove/what-is-a-meta-class-in-objective-c-cocoa-with-love.md
-25. https://yulingtianxia.com/blog/2014/11/05/objective-c-runtime/?utm_source=chatgpt.com
+> 阅读旧文章时要注意源码版本：其中一些文章基于早期 objc4，适合建立概念和理解设计演进；涉及当前字段布局、位掩码和方法实现时，本文以 Apple 当前公开源码以及本地采用的 objc4 版本为准。
 
 ---
 
