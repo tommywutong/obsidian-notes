@@ -67,14 +67,14 @@ Mach-O、堆和线程栈分别怎样形成这些区域
 
 - **物理内存（Physical Memory）**：设备真实存在、可由 CPU 访问的 RAM。进程访问虚拟地址时，CPU 的 MMU 会依据页表把它转换为对应的物理地址。
 
-![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260727180848288.png)
+![image.png](https://cdn.jsdelivr.net/gh/tommywutong/piccbes@master/img/20260727180848288.png)
 
 
 操作系统教材通常通过"分段"和"分页"两条路线介绍地址空间管理。对现代 arm64 iOS 来说，后文真正需要继续使用的是分页、页表、权限和 VM Region；分段主要帮助理解历史模型和逻辑区域。
 
 ### 分段
 
-![分段示意图](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260724154844318.png)
+![分段示意图](https://cdn.jsdelivr.net/gh/tommywutong/piccbes@master/img/20260724154844318.png)
 
 分段（Segmentation）是一种经典的内存管理思想：按照代码、数据、栈等逻辑单元描述地址空间，各段长度可以不同。它有助于理解"程序可以由不同用途、不同权限的区域组成"。
 
@@ -88,7 +88,7 @@ Mach-O、堆和线程栈分别怎样形成这些区域
 
 ### 分页
 
-![分页示意图](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260724154856696.png)
+![分页示意图](https://cdn.jsdelivr.net/gh/tommywutong/piccbes@master/img/20260724154856696.png)
 
 为了方便映射和管理，虚拟内存和物理内存都被分割成相同大小的单位，物理内存的最小单位被称为帧（Frame），而虚拟内存的最小单位被称为页（Page）。
 Apple 的虚拟内存资料说明，较新的 64 位 iOS 设备通常向用户空间暴露 16 KB 页面，Jetsam Event Report 的官方示例也是 16 KB；具体值仍应以设备和运行环境为准，可以通过 `vm_page_size`、`getpagesize()` 或报告中的 `pageSize` 字段确认，而不应在程序逻辑中写死。
@@ -101,7 +101,7 @@ Apple 的虚拟内存资料说明，较新的 64 位 iOS 设备通常向用户�
 
 ### 按需分页与 Page Fault（缺页中断）
 
-![](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260725092731666.png)
+![](https://cdn.jsdelivr.net/gh/tommywutong/piccbes@master/img/20260725092731666.png)
 
 1. **虚拟映射与延迟分配 (Lazy Allocation)**
 
@@ -132,7 +132,7 @@ Apple 的虚拟内存资料说明，较新的 64 位 iOS 设备通常向用户�
 
 一个运行中的 iOS App，本质上就是一个进程。系统会为它提供独立的虚拟地址空间。前文讨论的分页、页表和 VM Region，在这里不再只是操作系统教材中的抽象概念，而是 App 代码实际运行的环境。
 
-![](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260727180848288.png)
+![](https://cdn.jsdelivr.net/gh/tommywutong/piccbes@master/img/20260727180848288.png)
 
 
 下面先梳理一个 iOS App 从磁盘文件到运行中地址空间的过程。
@@ -178,7 +178,7 @@ Mach-O 主要解释启动时已经存在的代码和全局数据，但程序运�
 
 这就是我们经常提到的五大分区
 
-![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260727183544537.png)
+![image.png](https://cdn.jsdelivr.net/gh/tommywutong/piccbes@master/img/20260727183544537.png)
 
 
 栈（Stack）
@@ -186,23 +186,23 @@ Mach-O 主要解释启动时已经存在的代码和全局数据，但程序运�
 
 在 arm64/iOS 上，线程栈通常向低地址增长：需要新的栈空间时，栈顶指针（`SP`）向更小的地址移动；函数返回时 `SP` 往回移动。这里不要顺势背诵“堆一定向高地址增长”：现代分配器会管理多个 Region，堆不是一条与栈相向生长的单一连续线。
 
-![Snapzy_2026-07-27_18-38-30_502.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/Snapzy_2026-07-27_18-38-30_502.png)
+![Snapzy_2026-07-27_18-38-30_502.png](https://cdn.jsdelivr.net/gh/tommywutong/piccbes@master/img/Snapzy_2026-07-27_18-38-30_502.png)
 
 函数栈也称为栈，和上文是一个东西。
 我们首先理解一下"栈帧"（Stack Frame）这个概念。在便于学习的未优化模型里，一次函数调用可能在栈上保存局部变量、溢出到栈上的参数、返回地址以及需要恢复的寄存器状态。它能很好地解释递归和栈回溯，但不是“每个参数、每个局部变量都必然在栈上”的硬性布局表；最终位置取决于调用约定和编译优化。
 
-![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260727201729938.png)
+![image.png](https://cdn.jsdelivr.net/gh/tommywutong/piccbes@master/img/20260727201729938.png)
 
 怎么这么像微机8086呢（bushi）
 
-![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260727201756951.png)
+![image.png](https://cdn.jsdelivr.net/gh/tommywutong/piccbes@master/img/20260727201756951.png)
 
 
 这种设计非常巧妙，因为它天然支持了函数的递归调用——每一层递归都会产生一个独立的栈帧，各自拥有独立的局部变量副本,互不干扰,直到最内层递归返回时,栈帧才逐层弹出。
 
 栈溢出简单来说就是，如果递归函数嵌套太深或递归深度过大，栈帧（Stack Frame）不断累积，就会耗尽这块内存空间，产生栈溢出，程序因此崩溃
 
-![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260727195521956.png)
+![image.png](https://cdn.jsdelivr.net/gh/tommywutong/piccbes@master/img/20260727195521956.png)
 
 
 **堆**

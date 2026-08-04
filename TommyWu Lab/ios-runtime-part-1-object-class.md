@@ -118,9 +118,9 @@ public:
 };
 ```
 
-![isa_storage_memory_layout.svg](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/isa_storage_memory_layout.svg)
+![isa_storage_memory_layout.svg](https://cdn.jsdelivr.net/gh/tommywutong/piccbes@master/img/isa_storage_memory_layout.svg)
 
-![CleanShot 2026-05-30 at 13.17.22@2x.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/CleanShot%202026-05-30%20at%2013.17.22%402x.png)
+![CleanShot 2026-05-30 at 13.17.22@2x.png](https://cdn.jsdelivr.net/gh/tommywutong/piccbes@master/img/CleanShot%202026-05-30%20at%2013.17.22%402x.png)
 
 在看新版之前，先把旧版长什么样摆出来对比。这个结构其实经历了三个时代：
 
@@ -399,7 +399,7 @@ uintptr_t has_sidetable_rc:1; extra_rc:8;
 | **arm64e 签名合并** | **781 → 818** | `shiftcls:33` → `shiftcls_and_sig:52`（类指针并入 PAC 签名）；**砍掉 `magic`**、**砍掉 `deallocating`**（改由 `extra_rc==0 && has_sidetable_rc==0` 算出）、`has_cxx_dtor` 移出位域到 cache flags；`ISA_MASK` 由 `0x...0ffffffff8` 加宽到 `0x007ffffffffffff8`；`extra_rc` 从 19 位缩到 8 位（位都让给 52 位签名了） |
 | 封装收口 | 818 → 951 | `objc_object` 不再直接放 `isa_t`，改成 `char isa_storage[]` + `isa()` 访问器；成员方法批量加 `const`；RC 宏改为从 `RC_HAS_SIDETABLE_BIT` 派生；新增分平台的 `ISA_MASK_NOSIG`（位域本身不变） |
 
-![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260603170233955.png)
+![image.png](https://cdn.jsdelivr.net/gh/tommywutong/piccbes@master/img/20260603170233955.png)
 老isa图⬆️
 
 一句话记忆：**老博客那张 isa 图（`shiftcls:33`/`magic`/`deallocating`）一直用到 781；分水岭是 781↔818，arm64e 上为了塞进 PAC 签名，一口气合并了 `shiftcls` 并删掉了 `magic`、`deallocating` 两个字段。** 而 781 之前五年（680→781）arm64 布局几乎没动过
@@ -678,7 +678,7 @@ obj->initInstanceIsa(cls, hasCxxDtor);     // 把 isa 写进对象开头那 8 �
 
 # 类的本质：objc_class
 
-![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260617160338329.png)
+![image.png](https://cdn.jsdelivr.net/gh/tommywutong/piccbes@master/img/20260617160338329.png)
 
 ## 类本身也是对象
 
@@ -1078,7 +1078,7 @@ public:
 
 先看底下那层 `class_ro_t`——它就是编译期写死、运行期不可变的部分：
 
-![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260602110437370.png)
+![image.png](https://cdn.jsdelivr.net/gh/tommywutong/piccbes@master/img/20260602110437370.png)
 
 
 ```objc
@@ -1186,7 +1186,7 @@ methodizeClass(cls, previously);                 // ④ 装方法/属性/协议�
 这里先给 `method_t` 留一个最小定位：老版结构常被写成 `SEL name; const char *types; IMP imp;`。其中 `types` 就是 **Type Encoding**，用一串 C 字符串描述方法返回值和参数类型；`name` 是 selector；`imp` 是真正的函数实现地址。老源码里还会看到按 `SEL` 地址排序的比较器（如 `SortBySELAddress` 一类写法），它服务的是方法列表排序和后续查找。本文暂时不展开这些细节，Part 2 的方法查找会回到 `method_t`。
 
 
-![new_class_layout_objc4_818.svg](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/new_class_layout_objc4_818.svg)
+![new_class_layout_objc4_818.svg](https://cdn.jsdelivr.net/gh/tommywutong/piccbes@master/img/new_class_layout_objc4_818.svg)
 
 
 #### ro 与 rw 的分离：clean memory vs dirty memory
@@ -1282,7 +1282,7 @@ Class getMeta() const {
 
 # isa 走位与继承链
 
-![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260602162105369.png)
+![image.png](https://cdn.jsdelivr.net/gh/tommywutong/piccbes@master/img/20260602162105369.png)
 
 
 类的 `isa` 指向元类，元类的 `isa` 又指向谁？元类有没有父类？把这两条链走完，就是经典的「isa 走位图」。

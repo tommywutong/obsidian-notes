@@ -1544,9 +1544,26 @@ Animal 元类.superclass      0x1f6e35bb0   → 根元类
 1. **`根元类.isa (0x1f6e35bb0) == 根元类自身 (0x1f6e35bb0)`** —— isa 链到根元类就咬住自己，不再往上。
 2. **`根元类.superclass (0x1f6e35bd8) == NSObject 类 (0x1f6e35bd8)`** —— 元类的 superclass 链不是断在根元类，而是拐回 `NSObject` 类，再由它 `superclass=nil` 收尾。
 
-## isKindOfClass / isMemberOfClass
+# Runtime 入院考试：四道题串起对象、类与元类
+
+下面四道题出自 sunnyxx 的[《神经病院 objc runtime 入院考试》](https://blog.sunnyxx.com/2014/11/06/runtime-nuts/)。原文顺序依次是 `[self class] / [super class]`、`isKindOfClass / isMemberOfClass`、Category 中的 `+foo / -foo`、栈上伪造对象。本文仍按前面的知识递进来讲，所以保留“先类型判断、再 self/super”的顺序，但标题中的编号对应原题号。
+
+这四道题不是四个孤立的技巧：第一、二、三题都依赖前面那张 **类—元类—根类** 关系图，第四题则回到文章开头的 **对象 = isa + ivar**。
+
+## 入院题二：isKindOfClass / isMemberOfClass
 
 `isKindOfClass:` / `isMemberOfClass:`，底层就是顺着 `superclass` 链、isa 和元类链在走。源码只有几行（`NSObject.mm:2450`）：
+
+先把原题放在这里。假设 `Sark : NSObject`，下面四个结果分别是什么？
+
+```objc
+BOOL res1 = [(id)[NSObject class] isKindOfClass:[NSObject class]];
+BOOL res2 = [(id)[NSObject class] isMemberOfClass:[NSObject class]];
+BOOL res3 = [(id)[Sark class] isKindOfClass:[Sark class]];
+BOOL res4 = [(id)[Sark class] isMemberOfClass:[Sark class]];
+```
+
+答案是：`YES / NO / NO / NO`。这里特意强转成 `id`，是为了让编译器按实例消息的语法接受调用；但 receiver 实际仍是类对象，所以消息最终会落到下面的类方法版实现中。先记住答案，再沿源码逐个拆开。
 
 ```objc
 + (BOOL)isMemberOfClass:(Class)cls { return self->ISA() == cls; }   // 类方法版：比 isa（元类）
@@ -1603,7 +1620,7 @@ BOOL objc_opt_isKindOfClass(id obj, Class otherClass) {
 
 只要这个类没重写过 NSObject 的核心方法（`hasCustomCore()` 为假），判定就被内联成一段裸 C 循环直接爬完 `superclass` 链，连消息都不发——和前面 cache 那套「热路径少绕一层」是一个意思。
 
-## self 与 super：[self class] 和 [super class] 为什么都打印 Son
+## 入院题一：self 与 super——为什么 `[self class]` 和 `[super class]` 都打印 Son
 
 再看一道老题。`Son` 继承 `Father`，在 `Son` 的 `init` 里打印两行：
 
@@ -1658,9 +1675,61 @@ objc_msgSendSuper2(struct objc_super *super, SEL op, ...);
 
 总而言之：`super` 只换了**方法查找的起点**，没换 **receiver**；而 `class` 又只认 `object_getClass(self)`，所以 `[self class]` 和 `[super class]` 殊途同归，都打印 `Son`。
 
-# 入院题：Class 与内存地址
+## 入院题三：Category 声明 `+foo`，却实现了 `-foo`
 
-前面已经用 `[self class] / [super class]` 和 `isKindOfClass / isMemberOfClass` 两道老题，把 `self/super`、类与元类的查找关系串起来了。还有一道更“野”的题，专门用来把“对象就是一段内存”这件事推到地址级别。
+第三题故意让 Category 的声明和实现对不上：头文件声明的是类方法 `+foo`，实现里却写成实例方法 `-foo`。
+
+```objc
+@interface NSObject (Sark)
++ (void)foo;
+@end
+
+@implementation NSObject (Sark)
+- (void)foo {
+    NSLog(@"IMP: -[NSObject (Sark) foo]");
+}
+@end
+
+[NSObject foo];
+[[NSObject new] foo];
+```
+
+先说结果：这段代码可能收到“Category 没有实现已声明的 `+foo`”之类的编译警告，但仍能完成编译；运行时两次调用都能找到这里实现的 `-foo`，因此打印两次：
+
+```text
+IMP: -[NSObject (Sark) foo]
+IMP: -[NSObject (Sark) foo]
+```
+
+第二行比较直白。`[[NSObject new] foo]` 的 receiver 是 NSObject 实例，实例方法查找从 `NSObject` 类对象开始，而 Category 实现的 `-foo` 正好被加到了 `NSObject` 的实例方法列表中：
+
+```text
+NSObject 实例 --isa--> NSObject 类 --找到 -foo--> IMP
+```
+
+第一行才是题眼。`[NSObject foo]` 的 receiver 是 NSObject 类对象，因此类方法查找从 `NSObject` 元类开始。元类里没有真正实现 `+foo`，但前面已经看到一个特殊连接：**根元类的 `superclass` 指回 `NSObject` 类**。于是查找还能从根元类继续走到 NSObject 类，并在那里撞见 Category 加入的 `-foo`：
+
+```text
+NSObject 类 --isa--> NSObject 元类（根元类）
+                              |
+                              | superclass
+                              v
+                         NSObject 类 --找到 -foo--> IMP
+```
+
+所以这里不是“`+foo` 自动变成了 `-foo`”，也不是声明决定了方法被放在哪里。真正决定存放位置的是 **Category 实现中的 `+` / `-`**：
+
+- `+foo` 会进入元类的方法列表；
+- `-foo` 会进入类对象的方法列表；
+- 这道题之所以让 `[NSObject foo]` 也碰巧找到 `-foo`，靠的是根元类到根类那条特殊的 `superclass` 连线。
+
+还要注意，这个现象不能随意推广成“任意类都能把实例方法当类方法调用”。例如在 `Sark` 上实现 `-foo` 后调用 `[Sark foo]`，查找会从 `Sark` 元类沿元类继承链向上走，并不会进入 `Sark` 类对象，自然也找不到 `Sark` 的 `-foo`。原题选择 `NSObject`，正是为了利用根类与根元类之间的特殊结构。
+
+这是一道理解类与元类查找路径的实验题，不是可以在业务代码中利用的技巧。声明和实现故意不一致、Category 方法重名都会制造脆弱且难以维护的行为。
+
+## 入院题四：伪造对象与内存地址
+
+前三题已经把 `self/super`、类型判断以及根元类的特殊查找路径串起来了。最后一道更“野”，专门用来把“对象就是一段内存”这件事推到地址级别。
 
 先看代码：
 
@@ -1692,7 +1761,7 @@ void *obj = &cls;
 
 所以进入 `-speak` 后，`self` 不是一个正常堆对象，而是那块被伪装成对象的栈内存。
 
-## 为什么打印的可能不是 Sark 的 name
+### 为什么打印的可能不是 Sark 的 name
 
 如果 `Sark` 的第一个实例变量是 `name`，那么 `self.name` 本质上就是按 ivar offset 去读：
 
@@ -1724,7 +1793,7 @@ void *obj = &cls;
 
 那么偏移位置上的内容可能就变成 `myName`，输出也随之变成这个字符串。这不是属性访问有什么特殊魔法，而是裸内存偏移刚好读到了不同的栈内容。
 
-## 这道题真正说明什么
+### 这道题真正说明什么
 
 这道题把前面“对象 = isa + ivar”换了一个更底层的表述：
 
@@ -1771,7 +1840,7 @@ LLDB 里可以用 `x` 命令验证这件事：
 
 9. [sunnyxx - 重识 Objective-C Runtime](https://blog.sunnyxx.com/2016/08/13/reunderstanding-runtime-0/)
 
-10. [sunnyxx - 神经病院 Objective-C Runtime 入院第一天](https://blog.sunnyxx.com/2014/11/06/runtime-nuts/)
+10. [sunnyxx - 神经病院 objc runtime 入院考试](https://blog.sunnyxx.com/2014/11/06/runtime-nuts/)
 
 11. [sunnyxx - objc category 的秘密](https://blog.sunnyxx.com/2014/03/05/objc_category_secret/)
 

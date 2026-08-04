@@ -258,7 +258,7 @@ final class ViewController: UIViewController {
 文章里可以插入 GitHub 仓库卡片：
 
 ```md
-::github{repo="Biscoffee/tommywu-lab"}
+::github{repo="tommywutong/tommywu-lab"}
 ```
 
 页面会自动请求 GitHub API 展示仓库描述、语言、star、fork 和 license。
@@ -669,7 +669,7 @@ AI: "/covers/ai.svg"
 当前已经使用独立公开评论仓库：
 
 ```text
-Biscoffee/tommywu-lab-comments
+tommywutong/tommywu-lab-comments
 ```
 
 Giscus 官方要求：
@@ -684,7 +684,7 @@ Giscus 官方要求：
 enable: true
 ```
 
-如果线上评论区提示 Giscus App 没有安装，去这个地址安装，并选择 `Biscoffee/tommywu-lab-comments`：
+如果线上评论区提示 Giscus App 没有安装，去这个地址安装，并选择 `tommywutong/tommywu-lab-comments`：
 
 ```text
 https://github.com/apps/giscus/installations/new
