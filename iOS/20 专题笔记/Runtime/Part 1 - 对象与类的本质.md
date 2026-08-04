@@ -1796,6 +1796,8 @@ LLDB 里可以用 `x` 命令验证这件事：
 21. [Tenloy's Blog - ObjC Runtime 总结](https://tenloy.github.io/)
 22. 
 23. https://juejin.cn/post/6846687597478019079?searchId=20260802142016822CE31D1CB65C4E568B
+24. https://github.com/Biscoffee/apple-docs-vault/blob/agent/reader-navigation-r01/blogs/zh/cocoawithlove/what-is-a-meta-class-in-objective-c-cocoa-with-love.md
+25. https://yulingtianxia.com/blog/2014/11/05/objective-c-runtime/?utm_source=chatgpt.com
 
 ---
 
