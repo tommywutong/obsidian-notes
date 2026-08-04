@@ -1544,26 +1544,9 @@ Animal 元类.superclass      0x1f6e35bb0   → 根元类
 1. **`根元类.isa (0x1f6e35bb0) == 根元类自身 (0x1f6e35bb0)`** —— isa 链到根元类就咬住自己，不再往上。
 2. **`根元类.superclass (0x1f6e35bd8) == NSObject 类 (0x1f6e35bd8)`** —— 元类的 superclass 链不是断在根元类，而是拐回 `NSObject` 类，再由它 `superclass=nil` 收尾。
 
-# Runtime 入院考试：四道题串起对象、类与元类
-
-下面四道题出自 sunnyxx 的[《神经病院 objc runtime 入院考试》](https://blog.sunnyxx.com/2014/11/06/runtime-nuts/)。原文顺序依次是 `[self class] / [super class]`、`isKindOfClass / isMemberOfClass`、Category 中的 `+foo / -foo`、栈上伪造对象。本文仍按前面的知识递进来讲，所以保留“先类型判断、再 self/super”的顺序，但标题中的编号对应原题号。
-
-这四道题不是四个孤立的技巧：第一、二、三题都依赖前面那张 **类—元类—根类** 关系图，第四题则回到文章开头的 **对象 = isa + ivar**。
-
-## 入院题二：isKindOfClass / isMemberOfClass
+## isKindOfClass / isMemberOfClass
 
 `isKindOfClass:` / `isMemberOfClass:`，底层就是顺着 `superclass` 链、isa 和元类链在走。源码只有几行（`NSObject.mm:2450`）：
-
-先把原题放在这里。假设 `Sark : NSObject`，下面四个结果分别是什么？
-
-```objc
-BOOL res1 = [(id)[NSObject class] isKindOfClass:[NSObject class]];
-BOOL res2 = [(id)[NSObject class] isMemberOfClass:[NSObject class]];
-BOOL res3 = [(id)[Sark class] isKindOfClass:[Sark class]];
-BOOL res4 = [(id)[Sark class] isMemberOfClass:[Sark class]];
-```
-
-答案是：`YES / NO / NO / NO`。这里特意强转成 `id`，是为了让编译器按实例消息的语法接受调用；但 receiver 实际仍是类对象，所以消息最终会落到下面的类方法版实现中。先记住答案，再沿源码逐个拆开。
 
 ```objc
 + (BOOL)isMemberOfClass:(Class)cls { return self->ISA() == cls; }   // 类方法版：比 isa（元类）
@@ -1587,21 +1570,44 @@ BOOL res4 = [(id)[Sark class] isMemberOfClass:[Sark class]];
 
 四个方法逐个看。
 
-**① `- isMemberOfClass:`（实例版）** 就一次全等 `[self class] == cls`，不找父类。问的是「你是不是*正好*这个类的实例」。
+**① `- isMemberOfClass:`（实例）** 就一次全等 `[self class] == cls`，不找父类。问的是「你是不是*正好*这个类的实例」。
 
 - `[p isMemberOfClass:[Person class]]` → YES
 - `[p isMemberOfClass:[NSObject class]]` → NO（p 的类是 Person，虽然继承自 NSObject，但不"正好"是它）
 
-**② `- isKindOfClass:`（实例版）** 从 `[self class]` 起步，沿 `superclass` 往上爬（`Person → NSObject → nil`），任一层命中就 YES。问的是「你是不是这个类、或它子类的实例」。
+**② `- isKindOfClass:`（实例）** 从 `[self class]` 起步，沿 `superclass` 往上爬（`Person → NSObject → nil`），任一层命中就 YES。问的是「你是不是这个类、或它子类的实例」。
 
 - `[p isKindOfClass:[Person class]]` → YES（第一轮命中）
 - `[p isKindOfClass:[NSObject class]]` → YES（爬到 NSObject 命中）
 
-这两个实例版符合直觉，日常就用它们，没坑。坑在下面两个类方法版。
+**③ `+ isMemberOfClass:`（类方法）** `self->ISA() == cls`，比的是**元类**。`[Person isMemberOfClass:[Person class]]` → NO，
+```
+[Person isMemberOfClass:[Person class]];
+self        = Person 类对象
+self->ISA() = Person 元类
+cls         = Person 类对象
+// NO
 
-**③ `+ isMemberOfClass:`（类方法版）** `self->ISA() == cls`，比的是**元类**。`[Person isMemberOfClass:[Person class]]` → NO，因为左边是 Person 元类、右边是 Person 类。想让它 YES 得把元类传进去，可元类平时既拿不到也不会去传，所以这方法实际上几乎永远返回 NO。
+Class personClass = [Person class];
+Class personMeta  = object_getClass(personClass);
 
-**④ `+ isKindOfClass:`（类方法版）** 从 `self->ISA()`（元类）起步，沿**元类的 superclass 链**往上爬。对 Person 来说是：`Person 元类 → NSObject 元类 → NSObject 类 → nil`。注意倒数第二站是 **NSObject 类**——根元类的 superclass 指回根类。就是这条特殊连线，埋下了下面那个"灵异"结论。
+BOOL result = [Person isMemberOfClass:personMeta];
+// YES
+```
+
+**④ `+ isKindOfClass:`（类方法）** 从 `self->ISA()`（元类）起步，沿**元类的 superclass 链**往上爬。对 Person 来说是：`Person 元类 → NSObject 元类 → NSObject 类 → nil`。
+
+```
+[Person isKindOfClass:[Person class]]
+// NO
+[Person isKindOfClass:[NSObject class]]
+// YES
+[Person isKindOfClass:object_getClass([Person class])]
+// YES
+[Person isKindOfClass:object_getClass([NSObject class])]
+// YES
+```
+
 
 最后补一句运行时的实情：`[obj isKindOfClass:]` 多半根本走不到上面这个方法。编译器有个快路径 `objc_opt_isKindOfClass`（`NSObject.mm:2185`）：
 
@@ -1620,7 +1626,7 @@ BOOL objc_opt_isKindOfClass(id obj, Class otherClass) {
 
 只要这个类没重写过 NSObject 的核心方法（`hasCustomCore()` 为假），判定就被内联成一段裸 C 循环直接爬完 `superclass` 链，连消息都不发——和前面 cache 那套「热路径少绕一层」是一个意思。
 
-## 入院题一：self 与 super——为什么 `[self class]` 和 `[super class]` 都打印 Son
+## self 与 super：[self class] 和 [super class] 为什么都打印 Son
 
 再看一道老题。`Son` 继承 `Father`，在 `Son` 的 `init` 里打印两行：
 
@@ -1675,145 +1681,9 @@ objc_msgSendSuper2(struct objc_super *super, SEL op, ...);
 
 总而言之：`super` 只换了**方法查找的起点**，没换 **receiver**；而 `class` 又只认 `object_getClass(self)`，所以 `[self class]` 和 `[super class]` 殊途同归，都打印 `Son`。
 
-## 入院题三：Category 声明 `+foo`，却实现了 `-foo`
+# Runtime 入院题
 
-第三题故意让 Category 的声明和实现对不上：头文件声明的是类方法 `+foo`，实现里却写成实例方法 `-foo`。
-
-```objc
-@interface NSObject (Sark)
-+ (void)foo;
-@end
-
-@implementation NSObject (Sark)
-- (void)foo {
-    NSLog(@"IMP: -[NSObject (Sark) foo]");
-}
-@end
-
-[NSObject foo];
-[[NSObject new] foo];
-```
-
-先说结果：这段代码可能收到“Category 没有实现已声明的 `+foo`”之类的编译警告，但仍能完成编译；运行时两次调用都能找到这里实现的 `-foo`，因此打印两次：
-
-```text
-IMP: -[NSObject (Sark) foo]
-IMP: -[NSObject (Sark) foo]
-```
-
-第二行比较直白。`[[NSObject new] foo]` 的 receiver 是 NSObject 实例，实例方法查找从 `NSObject` 类对象开始，而 Category 实现的 `-foo` 正好被加到了 `NSObject` 的实例方法列表中：
-
-```text
-NSObject 实例 --isa--> NSObject 类 --找到 -foo--> IMP
-```
-
-第一行才是题眼。`[NSObject foo]` 的 receiver 是 NSObject 类对象，因此类方法查找从 `NSObject` 元类开始。元类里没有真正实现 `+foo`，但前面已经看到一个特殊连接：**根元类的 `superclass` 指回 `NSObject` 类**。于是查找还能从根元类继续走到 NSObject 类，并在那里撞见 Category 加入的 `-foo`：
-
-```text
-NSObject 类 --isa--> NSObject 元类（根元类）
-                              |
-                              | superclass
-                              v
-                         NSObject 类 --找到 -foo--> IMP
-```
-
-所以这里不是“`+foo` 自动变成了 `-foo`”，也不是声明决定了方法被放在哪里。真正决定存放位置的是 **Category 实现中的 `+` / `-`**：
-
-- `+foo` 会进入元类的方法列表；
-- `-foo` 会进入类对象的方法列表；
-- 这道题之所以让 `[NSObject foo]` 也碰巧找到 `-foo`，靠的是根元类到根类那条特殊的 `superclass` 连线。
-
-还要注意，这个现象不能随意推广成“任意类都能把实例方法当类方法调用”。例如在 `Sark` 上实现 `-foo` 后调用 `[Sark foo]`，查找会从 `Sark` 元类沿元类继承链向上走，并不会进入 `Sark` 类对象，自然也找不到 `Sark` 的 `-foo`。原题选择 `NSObject`，正是为了利用根类与根元类之间的特殊结构。
-
-这是一道理解类与元类查找路径的实验题，不是可以在业务代码中利用的技巧。声明和实现故意不一致、Category 方法重名都会制造脆弱且难以维护的行为。
-
-## 入院题四：伪造对象与内存地址
-
-前三题已经把 `self/super`、类型判断以及根元类的特殊查找路径串起来了。最后一道更“野”，专门用来把“对象就是一段内存”这件事推到地址级别。
-
-先看代码：
-
-```objc
-@interface Sark : NSObject
-@property (nonatomic, copy) NSString *name;
-- (void)speak;
-@end
-
-@implementation Sark
-- (void)speak {
-    NSLog(@"my name is %@", self.name);
-}
-@end
-
-id cls = [Sark class];
-void *obj = &cls;
-[(__bridge id)obj speak];
-```
-
-直觉上，`obj` 只是一个栈变量地址，硬桥接成 `id` 再发消息，好像应该崩。但在这个实验里，它可以走到 `speak`，因为 `objc_msgSend` 只关心一件事：`receiver` 指向的那块内存开头，能不能被解释出一个可用的 `isa`。
-
-这里 `cls` 变量里装的是 `[Sark class]`，也就是 Sark 类对象地址；`obj = &cls` 后，`obj` 指向这块栈内存。把 `obj` 当成 `id` 之后，Runtime 会从 `obj` 指向的位置读前 8 字节当作 `isa`。而那里正好放着 Sark 的 Class 地址，于是这块栈内存在 Runtime 看来就“像一个 Sark 实例”。
-
-注意这里的 `self` 和 `_cmd` 仍然是真实存在的隐藏参数：
-
-- `self`：这次消息的 receiver，也就是 `(__bridge id)obj`。
-- `_cmd`：当前方法的 selector，也就是 `@selector(speak)`。
-
-所以进入 `-speak` 后，`self` 不是一个正常堆对象，而是那块被伪装成对象的栈内存。
-
-### 为什么打印的可能不是 Sark 的 name
-
-如果 `Sark` 的第一个实例变量是 `name`，那么 `self.name` 本质上就是按 ivar offset 去读：
-
-```objc
-*(id *)((char *)self + offset(name))
-```
-
-对一个只有 `isa + name` 的简单对象来说，`name` 通常就在对象首地址后一个指针宽度的位置，也就是 `self + 8`。而这个实验里的 `self` 其实是 `&cls`，所以 `self + 8` 读到的不是正常对象里的 `name`，而是栈上紧挨着 `cls` 的下一格内容。
-
-在一些关闭优化的调试场景里，当前函数栈上可能会依次放着这些东西：
-
-1. `self` 隐藏参数
-2. `_cmd` 隐藏参数
-3. `[super viewDidLoad]` 相关的 `super_class`
-4. `[super viewDidLoad]` 相关的 `receiver`
-5. 局部变量 `obj`
-6. 局部变量 `cls`
-
-具体顺序会受编译器、优化级别和架构影响，不能当成语言规范。但这个实验想表达的点很明确：当你伪造对象时，ivar 访问不会“知道你是假的”，它仍然只做一件事：从 `self + offset` 位置取内存。
-
-所以如果 `self + offset(name)` 恰好落到某个 `ViewController *` 局部值上，`self.name` 打印出来就可能是那个 ViewController；如果你在旁边插入一个字符串变量：
-
-```objc
-id cls = [Sark class];
-NSString *myName = @"halfrost";
-void *obj = &cls;
-[(__bridge id)obj speak];
-```
-
-那么偏移位置上的内容可能就变成 `myName`，输出也随之变成这个字符串。这不是属性访问有什么特殊魔法，而是裸内存偏移刚好读到了不同的栈内容。
-
-### 这道题真正说明什么
-
-这道题把前面“对象 = isa + ivar”换了一个更底层的表述：
-
-```text
-id obj  指向一块内存
-obj[0]  必须能解释成 isa / Class
-ivar    = (char *)obj + offset
-```
-
-正常情况下，这块内存来自 `alloc`，在堆上，首 8 字节由 Runtime 写入合法 isa，后面按 `class_ro_t.ivars` 记录的 offset 摆放成员变量。这道题故意把栈变量地址伪装成对象地址，只是为了证明：Objective-C 对象访问在底层并不神秘，最终就是“从 receiver 指针出发，按固定偏移解释内存”。
-
-LLDB 里可以用 `x` 命令验证这件事：
-
-```text
-(lldb) x/4gx obj
-```
-
-`x/nfu` 里，`n` 是显示几个单元，`f` 是格式，`u` 是每个单元的大小。比如 `g` 表示 8 字节，`x/4gx` 就是“按 16 进制打印 4 个 8 字节”。用它看 `obj` 附近的内存，就能直接观察第一格是不是 Sark Class，下一格又被 `self.name` 当成了什么。
-
-这也是这道题最有价值的地方：它不是鼓励你写这种代码，而是逼你承认 Runtime 眼里的对象没有神秘外壳。只要一块内存开头能被解释成类，消息发送和 ivar 偏移就会按对象规则继续跑，至于这块内存是不是真的来自 `alloc`，那是另一个层面的安全问题。
+附上一篇博客，这部分直接阅读原文即可：[sunnyxx《神经病院 objc runtime 入院考试》](https://blog.sunnyxx.com/2014/11/06/runtime-nuts/)
 
 
 # At Last
