@@ -546,7 +546,7 @@ Swift 原生 `String` 有自己的 small-string 优化。只有桥接到 `NSStri
 
 - [[20 专题笔记/Runtime/Part 1 - 对象与类的本质]]
 - [[iOS 内存：从虚拟地址空间到堆与栈]]
-- [[iOS 内存：MRC 的所有权规则]]
+- [[iOS 内存管理：从 MRC、ARC 到属性关键字#第一部分：MRC 的所有权规则：retain、release 与 autorelease|MRC 的所有权规则]]
 
 ---
 

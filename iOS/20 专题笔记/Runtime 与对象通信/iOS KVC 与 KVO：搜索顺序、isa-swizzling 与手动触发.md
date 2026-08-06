@@ -140,7 +140,7 @@ NSMutableString *ms = [NSMutableString stringWithString:@"原值"];
 _text 的类 = __NSCFString
 ```
 
-外部握着的可变字符串改一下，属性跟着变。[[iOS 属性关键字：从所有权推导，而不是从类型名猜]] 那篇讲过 `copy` 修饰 `NSString` 是为了防这个，这里等于把防线绕过去了。前提是这个属性没有合成 setter。`@property (copy)` 正常声明是有 setter 的，只有你自己在 extension 里写 `readonly` 又没补 setter 时才会命中。
+外部握着的可变字符串改一下，属性跟着变。[[iOS 内存管理：从 MRC、ARC 到属性关键字#第三部分：属性关键字：从所有权推导，而不是从类型名猜|属性关键字：从所有权推导，而不是从类型名猜]] 那篇讲过 `copy` 修饰 `NSString` 是为了防这个，这里等于把防线绕过去了。前提是这个属性没有合成 setter。`@property (copy)` 正常声明是有 setter 的，只有你自己在 extension 里写 `readonly` 又没补 setter 时才会命中。
 
 ### readonly 属性能被 KVC 改
 
@@ -945,7 +945,7 @@ KVO 是在这套规则上插了两个拦截点。一个是被 swizzle 的 setter
 - [[20 专题笔记/Runtime/Part 1 - 对象与类的本质]]：isa 与元类
 - [[20 专题笔记/Runtime/Part 4 - Runtime 应用篇]]：KVO 动态子类的用法层面，本文只补机制和实测，不重复
 - [[iOS 对象模型：类型判断、内存对齐与 Tagged Pointer]]：`[self class]` 与 `object_getClass` 的分岔、`hasCustomCore` 与核心选择器，第五节那笔性能账接的是这里
-- [[iOS 属性关键字：从所有权推导，而不是从类型名猜]]：`copy` 语义为什么会被 KVC 的 ivar 兜底路径绕过
+- [[iOS 内存管理：从 MRC、ARC 到属性关键字#第三部分：属性关键字：从所有权推导，而不是从类型名猜|属性关键字：从所有权推导，而不是从类型名猜]]：`copy` 语义为什么会被 KVC 的 ivar 兜底路径绕过
 - 早年自写：[【iOS】KVC总结](https://blog.csdn.net/2402_86720949/article/details/152734765)（搜索规则那一节的三步链是对的，Apple 文档反而漏了一步）· [【iOS】KVO](https://blog.csdn.net/2402_86720949/article/details/154543600)（第八节填的就是那篇照抄的"不移除就野指针崩溃"）
 
 ---

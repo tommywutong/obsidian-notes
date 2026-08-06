@@ -15,10 +15,10 @@ series: 2026 暑假 iOS 底层学习
 seriesSlug: ios-internals-2026-summer
 seriesOrder: 4
 draft: true
-mergedFrom:
-  - iOS 内存：MRC 的所有权规则
-  - iOS 内存：ARC 的两半
-  - iOS 属性关键字：从所有权推导，而不是从类型名猜
+covers:
+  - MRC 所有权规则
+  - ARC 编译器插桩与 runtime 支持
+  - Objective-C 属性关键字
 ---
 # Objective-C 内存管理：从 MRC、ARC 到属性关键字
 
@@ -30,15 +30,6 @@ MRC、ARC 和属性关键字不是三套知识。MRC 给出所有权规则，ARC
 
 ## 第一部分：MRC 的所有权规则：retain、release 与 autorelease
 
-已经没人写 MRC 了，但所有权规则一天都没有消失。ARC 替你写配平代码，依据恰恰就是下面这四条规则——它是照着规则插的。不知道规则本身，"ARC 到底做了什么"就只能答到"自动管理内存"这个层次。
-
-还有两个更现实的理由。Core Foundation 对象至今要手动 `CFRetain` / `CFRelease`，`__bridge_transfer` 这些关键字表达的就是所有权转移；线上崩溃日志里的过度释放问题，不理解引用计数根本无从下手。
-
-顺带先把本文最硬的一个结论摆在前面：**网上讲 `extra_rc` 占 19 位的文章，在你现在用的模拟器、iPhone XS 起的所有真机、以及所有 Intel Mac 上都是错的，实测是 8 位。** 第四节有完整实验和源码依据。
-
-ARC 怎么把规则翻译成代码，放在本文第二部分 [[#第二部分：ARC 的两半：编译器插桩与 runtime 支持|ARC 的两半]]。
-
----
 
 ### 一、四条规则
 
@@ -528,7 +519,7 @@ Apple 的态度很明确：
 #### 本地
 
 - [[iOS 对象模型：类型判断、内存对齐与 Tagged Pointer]]
-- [[#第二部分：ARC 的两半：编译器插桩与 runtime 支持|iOS 内存：ARC 的两半]]
+- [[#第二部分：ARC 的两半：编译器插桩与 runtime 支持|ARC 的两半]]
 
 ---
 
@@ -949,8 +940,8 @@ ARC 的分工可以压缩成一句话：编译器做静态的所有权分析并�
 
 #### 本地
 
-- [[#第一部分：MRC 的所有权规则：retain、release 与 autorelease|iOS 内存：MRC 的所有权规则]]
-- [[#第三部分：属性关键字：从所有权推导，而不是从类型名猜|iOS 属性关键字：从所有权推导，而不是从类型名猜]]
+- [[#第一部分：MRC 的所有权规则：retain、release 与 autorelease|MRC 的所有权规则]]
+- [[#第三部分：属性关键字：从所有权推导，而不是从类型名猜|属性关键字：从所有权推导，而不是从类型名猜]]
 - [[iOS weak 的实现：SideTable 与置 nil 的时机]]
 
 ---

@@ -588,7 +588,7 @@ pointer_format:  12 (DYLD_CHAINED_PTR_ARM64E_USERLAND24)(authenticated arm64e, 8
 __DATA_CONST  __auth_got  0x100008000  auth-bind  Foundation/_NSLog (div=0x0000 ad=1 key=IA)
 ```
 
-dyld 写进去的不是裸地址，是带 PAC 签名的指针。真机上 A12 起就是这套。同一件事在 [[iOS 内存：MRC 的所有权规则]] 里也出现过：指针认证占掉 isa 的位，把 `extra_rc` 从 19 位压到 8 位。arm64e 这个架构对底层细节的影响，比大多数人以为的深。
+dyld 写进去的不是裸地址，是带 PAC 签名的指针。真机上 A12 起就是这套。同一件事在 [[iOS 内存管理：从 MRC、ARC 到属性关键字#第一部分：MRC 的所有权规则：retain、release 与 autorelease|MRC 的所有权规则]] 里也出现过：指针认证占掉 isa 的位，把 `extra_rc` 从 19 位压到 8 位。arm64e 这个架构对底层细节的影响，比大多数人以为的深。
 
 ### 另一个眼生的 section：`__objc_stubs`
 
@@ -785,7 +785,7 @@ Mach-O 的结构可以浓缩成一句话：header 说这是什么，load command
 
 包体积方面，最容易被忽略的是符号表。一个真实框架 `strip -x` 之后小了 44%，全来自 `__LINKEDIT`。ObjC 侧的固定成本是每个方法 12 字节的相对方法列表项加上 selector 名字的完整长度，实测精确到字节。
 
-最后是方法论，和 [[iOS 内存：MRC 的所有权规则]] 里那条一样：这一篇里所有"网上说的不对"的结论，没有一条是靠读更多文章得到的。开头那个阈值，是一个 for 循环编八次的事；`__LINKEDIT` 的九块内容，是把偏移抄进 Python 加一遍的事。遇到格式、阈值、体积这类问题，`otool -l` 打一遍比读十篇文章可靠。
+最后是方法论，和 [[iOS 内存管理：从 MRC、ARC 到属性关键字#第一部分：MRC 的所有权规则：retain、release 与 autorelease|MRC 的所有权规则]] 里那条一样：这一篇里所有"网上说的不对"的结论，没有一条是靠读更多文章得到的。开头那个阈值，是一个 for 循环编八次的事；`__LINKEDIT` 的九块内容，是把偏移抄进 Python 加一遍的事。遇到格式、阈值、体积这类问题，`otool -l` 打一遍比读十篇文章可靠。
 
 但也别把这句话当成免死金牌。我编八次拿到 13.4，差点就写下"网上说 iOS 15 的都是抄的"，而 iOS 15 在模拟器上是对的——我只是恰好没往那个方向编。**跑了实验只能保证你测的那个组合是对的，保证不了你测的组合覆盖了读者会遇到的组合。** 下判断之前先问一句：还有哪个维度我一直没动过。
 
@@ -813,7 +813,7 @@ Mach-O 的结构可以浓缩成一句话：header 说这是什么，load command
 
 - [[iOS 内存：从虚拟地址空间到堆与栈]]：Segment 如何映射成 VM Region、ASLR slide、符号化
 - [[dyld]]：装载与初始化流程，`__DATA_CONST` 的 `mprotect` 源码出自这里
-- [[iOS 内存：MRC 的所有权规则]]：arm64e 指针认证对 isa 位域的影响
+- [[iOS 内存管理：从 MRC、ARC 到属性关键字#第一部分：MRC 的所有权规则：retain、release 与 autorelease|MRC 的所有权规则]]：arm64e 指针认证对 isa 位域的影响
 
 ---
 
