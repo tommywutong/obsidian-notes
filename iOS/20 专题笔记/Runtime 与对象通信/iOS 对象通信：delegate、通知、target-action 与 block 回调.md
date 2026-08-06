@@ -251,7 +251,7 @@ protocol_t 内存直读：mangledName=Wire size=96 flags=0x0
 
 ### delegate 为什么用 weak
 
-流行答案是"防止循环引用"。我在 [[iOS 内存管理：从 MRC、ARC 到属性关键字#属性关键字：把所有权写进 API|属性关键字：从所有权推导，而不是从类型名猜]] 里说过这个说法把因果讲反了。
+流行答案是"防止循环引用"。我在 [[iOS 属性关键字：从所有权推导，而不是从类型名猜]] 里说过这个说法把因果讲反了。
 
 真正的理由是所有权方向。`UITableView` 不该拥有它的 delegate，因为那通常是一个更上层、活得更久的对象。这是一条关于"谁是谁的一部分"的判断。跟有没有环无关。三种写法各跑一遍：
 
@@ -899,7 +899,7 @@ extension Foundation.NotificationCenter {
 ### 本地
 
 - [[20 专题笔记/Runtime/Part 2 - 消息发送与转发]]
-- [[iOS 内存管理：从 MRC、ARC 到属性关键字#属性关键字：把所有权写进 API|属性关键字：从所有权推导，而不是从类型名猜]]
+- [[iOS 属性关键字：从所有权推导，而不是从类型名猜]]
 - [[iOS Block 循环引用与 weak-strong dance]]
 - [[iOS Block 的结构：ABI、descriptor 与三种类型]]
 - [[iOS weak 的实现：SideTable 与置 nil 的时机]]

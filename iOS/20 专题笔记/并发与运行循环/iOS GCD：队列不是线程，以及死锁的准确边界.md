@@ -930,7 +930,7 @@ barrier 只在 `DISPATCH_QUEUE_CONCURRENT` 的自建队列上有屏障语义。�
 
 ### 本地
 
-- [[iOS 内存管理：从 MRC、ARC 到属性关键字#属性关键字：把所有权写进 API|属性关键字：从所有权推导，而不是从类型名猜]]：`atomic` 为什么不等于线程安全
+- [[iOS 属性关键字：从所有权推导，而不是从类型名猜]]：`atomic` 为什么不等于线程安全
 - [[iOS 锁：从 OSSpinLock 的废弃说起]]：优先级反转的完整版，以及那组 1049 ms 对 12 ~ 19 ms
 - [[iOS NSOperation：状态机、依赖与自定义并发 Operation]]：真正能限并发数的那个 API
 - [[iOS RunLoop：mode、source 与那张流程图今天还对不对]]：主线程上的 RunLoop 怎么 drain 主队列

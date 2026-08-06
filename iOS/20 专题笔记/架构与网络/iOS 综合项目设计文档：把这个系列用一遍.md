@@ -482,7 +482,7 @@ I4｜启动优化的验收标准不是 `DYLD_PRINT_STATISTICS`。
 9. JSONModel 慢不是因为用了 runtime 和 KVC。五个补丁删掉 42.3% 的差距，没有一个动到自省或 KVC 本身。（[[iOS JSONModel 源码：Runtime 驱动的属性映射]]）
 10. `clipsToBounds` 对 hitTest 毫无影响。Apple 那句被反复引用的原话讲的是可见性，不是命中规则。（[[iOS 事件传递与响应者链：hitTest、手势与那些点不动的按钮]]）
 
-再补三条。它们不影响这个 App，但同样反直觉。`extra_rc` 占 19 位只在无指针认证的 arm64 上成立，arm64e、所有模拟器和所有 x86_64 都是 8 位（[[iOS 内存管理：从 MRC、ARC 到属性关键字#引用计数存在哪里|MRC 的所有权规则]]）。Foundation 集合的扩容倍率收敛到 φ = 1.61803，看到的那段整齐的 2.000 是分配器尺寸类造成的假象（[[iOS Foundation 集合：类簇、真实实现与选型]]）。动态库不一定省包体积，单 target 下净亏 33 KB（[[iOS 静态库与动态库：加载时机、@rpath 与体积账]]）。
+再补三条。它们不影响这个 App，但同样反直觉。`extra_rc` 占 19 位只在无指针认证的 arm64 上成立，arm64e、所有模拟器和所有 x86_64 都是 8 位（[[iOS 内存：MRC 的所有权规则#四、引用计数存在哪：一个能测出来的问题|MRC 的所有权规则]]）。Foundation 集合的扩容倍率收敛到 φ = 1.61803，看到的那段整齐的 2.000 是分配器尺寸类造成的假象（[[iOS Foundation 集合：类簇、真实实现与选型]]）。动态库不一定省包体积，单 target 下净亏 33 KB（[[iOS 静态库与动态库：加载时机、@rpath 与体积账]]）。
 
 ### 方法论上的收获
 
@@ -515,9 +515,9 @@ I4｜启动优化的验收标准不是 `DYLD_PRINT_STATISTICS`。
 - [[iOS 内存：从虚拟地址空间到堆与栈]]
 - [[iOS 内存：Clean、Dirty、Compressed 与 Memory Footprint]]
 - [[iOS 对象模型：类型判断、内存对齐与 Tagged Pointer]]
-- [[iOS 内存管理：从 MRC、ARC 到属性关键字#所有权规则：MRC 是 ARC 的地基|MRC 的所有权规则]]
-- [[iOS 内存管理：从 MRC、ARC 到属性关键字#ARC：规则如何变成代码|ARC 的两半]]
-- [[iOS 内存管理：从 MRC、ARC 到属性关键字#属性关键字：把所有权写进 API|属性关键字：从所有权推导，而不是从类型名猜]]
+- [[iOS 内存：MRC 的所有权规则|MRC 的所有权规则]]
+- [[iOS 内存：ARC 的两半|ARC 的两半]]
+- [[iOS 属性关键字：从所有权推导，而不是从类型名猜]]
 - [[iOS weak 的实现：SideTable 与置 nil 的时机]]
 - [[iOS Block 的结构：ABI、descriptor 与三种类型]]
 - [[iOS Block 的变量捕获与 __block]]

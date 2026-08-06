@@ -278,7 +278,7 @@ enum {
 
 两个细节。它是递归锁（"recursive"），后面会验证。返回值有两种，而 `@synchronized` 语法把返回值整个丢掉了。
 
-对象和锁之间的映射由运行时维护：一张按对象地址分片的全局表，加上线程本地的缓存。上一篇 [[iOS 内存管理：从 MRC、ARC 到属性关键字#属性关键字：把所有权写进 API|属性关键字：从所有权推导，而不是从类型名猜]] 里讲 `atomic` 时提过同一个数据结构 `StripedMap`，`PropertyLocks` 用的就是它，真机上只有 8 个分片、Mac 和模拟器上是 64 个。`@synchronized` 的对象表是同一个套路。
+对象和锁之间的映射由运行时维护：一张按对象地址分片的全局表，加上线程本地的缓存。上一篇 [[iOS 属性关键字：从所有权推导，而不是从类型名猜]] 里讲 `atomic` 时提过同一个数据结构 `StripedMap`，`PropertyLocks` 用的就是它，真机上只有 8 个分片、Mac 和模拟器上是 64 个。`@synchronized` 的对象表是同一个套路。
 
 ### 一个我猜错了的实验
 
@@ -649,7 +649,7 @@ asi: "BUG IN CLIENT OF LIBDISPATCH: Semaphore object deallocated while in use (c
 ### 本地
 
 - [[iOS GCD：队列不是线程，以及死锁的准确边界]]：`dispatch_sync` 在调用线程就地执行、barrier 在全局队列上失效、死锁的 target 链判据
-- [[iOS 内存管理：从 MRC、ARC 到属性关键字#属性关键字：把所有权写进 API|属性关键字：从所有权推导，而不是从类型名猜]]：`atomic` 保护了什么，`PropertyLocks` 的 `StripedMap` 分片（真机 8 个，Mac 和模拟器 64 个）
+- [[iOS 属性关键字：从所有权推导，而不是从类型名猜]]：`atomic` 保护了什么，`PropertyLocks` 的 `StripedMap` 分片（真机 8 个，Mac 和模拟器 64 个）
 - [[iOS weak 的实现：SideTable 与置 nil 的时机]]：按地址排序加锁避免环形等待的实例
 
 ---
