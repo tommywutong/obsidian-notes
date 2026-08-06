@@ -74,17 +74,17 @@ draft: true
       对应计划 Day 3。实验全部真跑：10 组类型判断、ivar 偏移与两种对齐、Tagged Pointer 探针、
       三次启动的混淆器对照、字面量常量折叠对照、`CFGetRetainCount` = INT64_MAX。
       **修正**：arm64 标记位在 **bit63**，不是网上常说的最低位；`malloc_size == 0` 不足以判定 tagged。
-- [x] 04 iOS 内存：MRC 的所有权规则（内存管理/）—— 对应 Day 4，审查中
+- [x] 04 iOS 内存：MRC 的所有权规则（内存管理/）—— 对应 Day 4，审查中；已整合入 [[iOS 内存管理：从 MRC、ARC 到属性关键字#第一部分：MRC 的所有权规则：retain、release 与 autorelease|统一成稿]]
       **实测硬料**：按 `isa.h` 位域解析 isa，反复 retain 到溢出。第 253 次 `extra_rc` 跑满 255，
       第 254 次 `has_sidetable_rc` 翻 1、`extra_rc` 回落 128（= `RC_HALF`）。
       **纠正**：中文资料通说的「extra_rc 占 19 位」只对无 ptrauth 的 arm64 成立；arm64e 与模拟器上是 8 位。
-- [x] 05 iOS 内存：ARC 的两半（内存管理/）—— 对应 Day 5，审查中
+- [x] 05 iOS 内存：ARC 的两半（内存管理/）—— 对应 Day 5，审查中；已整合入 [[iOS 内存管理：从 MRC、ARC 到属性关键字#第二部分：ARC 的两半：编译器插桩与 runtime 支持|统一成稿]]
       **实测硬料**：六个场景的 LLVM IR，`-O0` vs `-O1` 对照（`setLabel` 从 4 个 storeStrong 变 0）；
       arm64 的 `mov x29, x29` marker vs x86_64 无 marker 的双架构汇编对照。
       **意外发现**：合成的 nonatomic strong getter 在 -O0 下一个 objc_* 调用都不生成。
 
 ### 第二周：weak、属性关键字与 Block
-- [x] 06 属性关键字：从所有权推导，而不是从类型名猜（内存管理/）—— Day 1，审查中
+- [x] 06 属性关键字：从所有权推导，而不是从类型名猜（内存管理/）—— Day 1，审查中；已整合入 [[iOS 内存管理：从 MRC、ARC 到属性关键字#第三部分：属性关键字：从所有权推导，而不是从类型名猜|统一成稿]]
       **实测硬料**：atomic 属性十万次并发自增丢掉一半计数，且比 nonatomic 丢得更多；加锁才 100000。
       长字符串 / NSArray / NSDictionary 的 copy 返回同一对象；容器 mutableCopy 只复制一层；
       `copy` 修饰 NSMutableArray 实际存进 `__NSSingleObjectArrayI`，addObject: 抛 unrecognized selector。

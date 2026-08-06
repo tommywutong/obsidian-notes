@@ -15,6 +15,9 @@ draft: true
 ---
 # MRC 的所有权规则：retain、release 与 autorelease
 
+> [!note] 已整合
+> 本文已与 ARC、属性关键字两篇合并为 [[iOS 内存管理：从 MRC、ARC 到属性关键字#第一部分：MRC 的所有权规则：retain、release 与 autorelease|Objective-C 内存管理：从 MRC、ARC 到属性关键字]]。本文件保留为分篇原稿，以兼容既有链接。
+
 已经没人写 MRC 了，但所有权规则一天都没有消失。ARC 替你写配平代码，依据恰恰就是下面这四条规则——它是照着规则插的。不知道规则本身，"ARC 到底做了什么"就只能答到"自动管理内存"这个层次。
 
 还有两个更现实的理由。Core Foundation 对象至今要手动 `CFRetain` / `CFRelease`，`__bridge_transfer` 这些关键字表达的就是所有权转移；线上崩溃日志里的过度释放问题，不理解引用计数根本无从下手。
