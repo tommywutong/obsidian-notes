@@ -22,21 +22,27 @@ covers:
 ---
 # Objective-C 内存管理：从 MRC、ARC 到属性关键字
 
-MRC、ARC 和属性关键字不是三套知识。MRC 定义谁拥有对象、何时放弃所有权；ARC 把这些规则翻译成编译器插桩和 runtime 操作；属性关键字再把所有权、原子性和接口暴露方式写进类的公开契约。
+##  前言
 
-已经没人写 MRC 了，但所有权规则一天都没有消失。ARC 替你写配平代码，依据恰恰就是下面这四条规则——它是照着规则插的。不知道规则本身，"ARC 到底做了什么"就只能答到"自动管理内存"这个层次。
+接着上篇iOS内存，本文我们继续讲解内存管理机制。
+移动端的内存管理机制，主要有三种：
 
-还有两个更现实的理由。Core Foundation 对象至今要手动 `CFRetain` / `CFRelease`，`__bridge_transfer` 这些关键字表达的就是所有权转移；线上崩溃日志里的过度释放问题，不理解引用计数根本无从下手。
+- 自动垃圾收集（GC）
+- 手工引用计数和自动释放池（MRC）
+- 自动引用计数（ARC）
 
-顺带先把本文最硬的一个结论摆在前面：**网上讲 `extra_rc` 占 19 位的文章，在你现在用的模拟器、iPhone XS 起的所有真机、以及所有 Intel Mac 上都是错的，实测是 8 位。** 后面的引用计数章节有完整实验和源码依据。
+其中 iOS 运行环境不支持自动垃圾收集机制（GC）。苹果公司使用的是手工引用计数（MRC）和自动引用计数（ARC）机制。
 
----
+在自动引用计数（ARC）出现机制之前，一直是通过手工引用计数（MRC）机制这种手写大量管理代码的方式来管理内存。后来苹果公司开发了自动引用计数（ARC）技术，把这部分工作交给了编译器来完成，从而大大简化了开发工作。但是 ARC 依然还是需要注意循环引用的问题。
+
+下面我们会详细讲解一下「手工引用计数（MRC）」和「自动引用计数（ARC）」。
+
 
 ## 所有权规则：MRC 是 ARC 的地基
 
 ### 四条规则
 
-Apple 的 Memory Management Policy 只有四句话，值得看原文，因为中文转述经常把第一条讲歪。
+Apple 的 Memory Management Policy 只有四句话：
 
 > **You own any object you create.** You create an object using a method whose name begins with "alloc", "new", "copy", or "mutableCopy" (for example, `alloc`, `newObject`, or `mutableCopy`).
 
@@ -73,6 +79,8 @@ NSString *c = [s copy];   // 前缀是 copy，我拥有它，必须 release
 MRC 下 `@property (copy)` 的 setter 也是同一套逻辑：`_s = [newValue copy]` 拿到 +1，所以 `dealloc` 里必须 `release`。
 
 顺带说，这套约定在 ARC 时代不但没作废，反而变成了编译器行为的一部分——返回值优化正是靠静态匹配这些前缀来决定要不要插 retain。
+
+
 
 #### Core Foundation 说的是同一件事的另一种方言
 
