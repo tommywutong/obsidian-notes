@@ -25,6 +25,13 @@ draft: true
 上一篇 [[iOS 内存：MRC 的所有权规则]] 讲规则本身，这篇讲规则怎么被翻译成代码。
 
 ---
+![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260806211750893.png)
+
+
+![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260806211757541.png)
+
+
+
 
 ## 先看编译器插了什么
 
