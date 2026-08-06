@@ -17,27 +17,112 @@ draft: true
 
 MRC 的全称是 Manual Reference Counting，即手动引用计数。在 MRC 下，开发者需要明确表示什么时候开始持有一个对象，以及什么时候不再需要它。
 
-这篇文章依次回答三个问题：
+#### dealloc 方法
 
-1. 怎样判断自己是否拥有一个对象；
-2. `retain`、`release` 和 `autorelease` 分别做什么；
-3. 引用计数归零以后，Runtime 怎样销毁对象。
+- 当一个对象的引用计数器值为 0 时，这个对象即将被销毁，其占用的内存被系统回收。
+- 对象即将被销毁时系统会自动给对象发送一条 `dealloc` 消息（因此，从 `dealloc` 方法有没有被调用，就可以判断出对象是否被销毁）
+- `dealloc` 方法的重写（**注意是在 MRC 中**）
+    - 一般会重写 `dealloc` 方法，在这里释放相关资源，`dealloc` 就是对象的遗言
+    - 一旦重写了 `dealloc` 方法，就必须调用 `[super dealloc]`，并且放在最后面调用。
 
-ARC 如何自动完成这些工作，放在下一篇 [[iOS 内存：ARC 的两半]]。本文先把 MRC 的规则和 Runtime 实现分开说明；源码部分以 Apple 公布的 objc4-951.1 为准。
+> `dealloc` 使用注意：
+
+- 不能直接调用 `dealloc` 方法。
+- 一旦对象被回收了, 它占用的内存就不再可用，坚持使用会导致程序崩溃（野指针错误）。
+
+#### 3.4 野指针和空指针
+
+- 只要一个对象被释放了，我们就称这个对象为「僵尸对象（不能再使用的对象）」。
+- 当一个指针指向一个僵尸对象（不能再使用的对象），我们就称这个指针为「野指针」。
+- 只要给一个野指针发送消息就会报错（EXC_BAD_ACCESS 错误）。
+
+
+```javascript
+int main(int argc, const char * argv[]) {
+    @autoreleasepool {
+        Person *p = [[Person alloc] init]; // 执行完引用计数为 1。
+
+        [p release]; // 执行完引用计数为 0，实例对象被释放。
+        [p release]; // 此时，p 就变成了野指针，再给野指针 p 发送消息就会报错。
+        [p release]; // 报错
+    }
+    return 0;
+}
+```
+
+- 为了避免给野指针发送消息会报错，一般情况下，当一个对象被释放后我们会将这个对象的指针设置为空指针。
+- 空指针：
+    - 没有指向存储空间的指针（里面存的是 nil, 也就是 0）。
+    - 给空指针发消息是没有任何反应的。
+
+```javascript
+int main(int argc, const char * argv[]) {
+    @autoreleasepool {
+        Person *p = [[Person alloc] init]; // 执行完引用计数为 1。
+
+        [p release]; // 执行完引用计数为 0，实例对象被释放。
+        p = nil; // 此时，p 变为了空指针。
+        [p release]; // 再给空指针 p 发送消息就不会报错了。
+        [p release];
+    }
+    return 0;
+}
+```
 
 ## 一、四条规则
 
-Apple 的 [Memory Management Policy](https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/MemoryMgmt/Articles/mmRules.html) 可以概括成四条：
+Apple 的 [Memory Management Policy](https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/MemoryMgmt/Articles/mmRules.html) 给出了四条所有权规则。
 
-1. 通过 `alloc`、`new`、`copy`、`mutableCopy` 开头的方法取得对象时，调用方拥有该对象；
-2. 可以通过 `retain` 取得一份所有权；
-3. 不再需要自己拥有的对象时，必须调用 `release` 或 `autorelease` 放弃所有权；
-4. 不要释放自己并不拥有的对象。
+### 规则一：自己创建的对象，自己拥有，自己负责释放
 
-后文会使用 `+1` 和 `+0` 这两个简写：
+> **You own any object you create.** You create an object using a method whose name begins with "alloc", "new", "copy", or "mutableCopy" (for example, `alloc`, `newObject`, or `mutableCopy`).
 
-- **`+1`**：调用方拥有一份所有权，以后必须负责一次对应的 `release`；
-- **`+0`**：调用方没有取得所有权，只能在对象仍然有效的期间使用它。如果需要长期保存，应先 `retain`。
+通过 `alloc`、`new`、`copy`、`mutableCopy` 方法族取得对象时，调用方拥有该对象。
+
+>（由各类实现的 `copyWithZone:` 方法和 `mutableCopyWithZone:` 方法将生成并持有对象的副本。）
+
+另外，由上面四种方法名称开头的方法名，也将生成并持有对象：
+
+- `allocMyObject`
+- `newMyObject`
+- `copyMyObject`
+- `mutableCopyMyObject`
+
+对应的内存管理思想是：**自己生成的对象，自己持有。**
+
+这里的“拥有”表示调用方取得了一份需要自己负责的所有权。当这份所有权不再需要时，调用方必须执行一次对应的 `release` 或 `autorelease`。
+
+判断依据是方法名所属的家族，而不是方法内部到底有没有重新分配一块内存。例如，不可变对象执行 `copy` 时可能直接返回自己，但调用方仍然拥有 `copy` 方法族返回的对象。
+
+### 规则二：不是自己创建的对象，也可以取得所有权
+
+> **You can take ownership of an object using retain.** You use `retain` in two situations: in the implementation of an accessor method or an `init` method, to take ownership of an object you want to store as a property value; and to prevent an object from being invalidated as a side-effect of some other operation.
+
+有些方法会返回一个调用方不拥有的对象。调用方可以暂时使用它；如果需要跨越当前作用范围继续保存，就可以调用 `retain`，主动取得一份所有权。既然取得了这份所有权，以后也必须负责将它释放。
+
+### 规则三：不再需要时，放弃自己的所有权
+
+> **When you no longer need it, you must relinquish ownership of an object you own.** You relinquish ownership of an object by sending it a `release` message or an `autorelease` message.
+
+Apple 的规则是：不再需要自己拥有的对象时，必须调用 `release` 或 `autorelease` 放弃所有权。
+
+对应的内存管理思想是：**不再需要自己持有的对象时，释放它。**
+
+一次 `release` 只表示放弃自己的一份所有权，不等于要求对象立即销毁。如果还有其他所有者，对象仍然会继续存在；只有最后一份所有权也被放弃，引用计数归零时，对象才会进入销毁流程。
+
+`autorelease` 放弃的也是一份所有权，只是把对应的 `release` 推迟到自动释放池处理时执行。
+
+### 规则四：不能放弃不属于自己的所有权
+
+> **You must not relinquish ownership of an object you do not own.**
+
+Apple 的规则是：不要释放自己并不拥有的对象。
+
+对应的内存管理思想是：**非自己持有的对象，不能释放。**
+
+这里的“不能释放”不等于“不能使用”。调用方可以在对象仍然有效的时间内使用一个自己不拥有的对象，只是不能直接对它执行 `release`。如果确实需要长期保存，应先通过 `retain` 取得自己的所有权，再在不需要时放弃这份所有权。
+
+因此，这四条可以合成一句话：**只放弃自己拥有的那一份所有权；取得了几份，就要对应放弃几份。**
 
 是否拥有返回对象，依据的是方法命名约定，而不是方法内部是否真的创建了新对象。`newObject` 也符合规则，因为它的名字以 `new` 开头。
 
@@ -49,7 +134,7 @@ NSString *b = [a stringByAppendingString:@"x"];            // 前缀不匹配，
 [b release];                                       // 错误：释放了不拥有的对象
 ```
 
-`stringByAppendingString:` 不属于上述四个方法族，因此返回值是 `+0`。调用方可以使用 `b`，但不能直接对它执行 `release`；如果需要长期保存，应先 `retain`。
+`stringByAppendingString:` 不属于上述四个方法族，因此调用方不拥有它的返回值。调用方可以使用 `b`，但不能直接对它执行 `release`；如果需要长期保存，应先 `retain`。
 
 反过来，`copy` 可能返回原对象，但调用方仍然取得了所有权：
 
@@ -59,11 +144,11 @@ NSString *c = [s copy];   // 前缀是 copy，我拥有它，必须 release
                           // 对不可变对象，c 可能与 s 是同一个对象
 ```
 
-不可变对象执行 `copy` 时可以直接返回自身并增加引用计数。即使 `c == s`，`copy` 的返回值仍然是 `+1`，调用方之后必须执行一次 `release`。
+不可变对象执行 `copy` 时可以直接返回自身并增加引用计数。即使 `c == s`，调用方仍然拥有 `copy` 的返回值，之后必须执行一次 `release`。
 
 这两个例子说明：所有权规则描述的是调用方与 API 之间的约定，与方法内部是否分配新对象没有直接关系。
 
-MRC 下 `@property (copy)` 的 setter 也遵循同一规则。`[newValue copy]` 返回 `+1`，因此属性所属对象销毁时，需要对保存的值执行 `release`。
+MRC 下 `@property (copy)` 的 setter 也遵循同一规则。调用 `[newValue copy]` 后，setter 拥有返回的对象，因此属性所属对象销毁时，需要对保存的值执行 `release`。
 
 ARC 仍然使用这些方法族判断返回值的所有权，只是对应的引用计数操作改由编译器生成。
 
@@ -71,8 +156,8 @@ ARC 仍然使用这些方法族判断返回值的所有权，只是对应的引�
 
 Core Foundation 使用类似的命名约定：
 
-- **Create Rule**：函数名中包含 `Create` 或 `Copy` 时，返回值通常是 `+1`，调用方负责 `CFRelease`；
-- **Get Rule**：函数名中包含 `Get` 时，返回值通常是 `+0`，调用方不能直接释放，除非另外取得了所有权。
+- **Create Rule**：函数名中包含 `Create` 或 `Copy` 时，调用方通常拥有返回值，并负责 `CFRelease`；
+- **Get Rule**：函数名中包含 `Get` 时，调用方通常不拥有返回值，不能直接释放，除非另外取得了所有权。
 
 Objective-C 对象与 Core Foundation 对象桥接时，三个关键字分别表示：
 
@@ -141,7 +226,7 @@ ARC 下不再手写这三行，但相同的赋值语义仍然存在，通常由 
 
 ```objc
 Box *makeBox(void) {
-    Box *b = [[Box alloc] init];   // +1，此刻我拥有它
+    Box *b = [[Box alloc] init];   // 创建方拥有 b
     return b;
 }
 ```
@@ -151,7 +236,7 @@ Box *makeBox(void) {
 ```objc
 Box *makeBox(void) {
     Box *b = [[Box alloc] init];
-    return [b autorelease];   // 返回 +0 对象，release 将在之后执行
+    return [b autorelease];   // 调用方不拥有返回对象，release 将在之后执行
 }
 ```
 
@@ -464,7 +549,7 @@ Instruments 的 Leaks 主要检测已经不可达、但仍未释放的内存。�
 
 ## 总结
 
-MRC 的核心是让每一份所有权都能够配平。通过 `alloc`、`new`、`copy`、`mutableCopy` 方法族取得的对象是 `+1`；`retain` 会再取得一份所有权；不再需要时，要用 `release` 或 `autorelease` 放弃相应的所有权。判断依据是 API 的命名约定，而不是方法内部是否真的创建了新对象。Core Foundation 的 Create/Get Rule 遵循相同的思路。
+MRC 的核心是让每一份所有权都能够配平。通过 `alloc`、`new`、`copy`、`mutableCopy` 方法族取得对象时，调用方拥有返回对象；`retain` 会再取得一份所有权；不再需要时，要用 `release` 或 `autorelease` 放弃相应的所有权。判断依据是 API 的命名约定，而不是方法内部是否真的创建了新对象。Core Foundation 的 Create/Get Rule 遵循相同的思路。
 
 在支持内联引用计数的当前实现中，常用计数优先保存在 non-pointer isa 的 `extra_rc` 中，空间不足时再把部分计数保存到 SideTable。本文在 arm64 模拟器上使用的布局中，`extra_rc` 占 8 位；实验观察到第 254 次额外 `retain` 触发溢出，并有 128 份计数转入 SideTable。无指针认证的 arm64 分支则使用 19 位。位宽和溢出条件都属于版本、架构相关的实现细节。
 
