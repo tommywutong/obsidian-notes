@@ -1,7 +1,7 @@
 ---
 title: 【iOS】Objective-C 内存管理：从 MRC、ARC 到属性关键字
 published: 2026-07-26
-description: 从 MRC 的四条所有权规则出发，追到 ARC 的编译器插桩与 runtime 支持，最后落到 strong、copy、weak、atomic 等属性关键字的实际语义。
+description: 从所有权规则出发，贯通 MRC 手工配平、ARC 编译器插桩、runtime 引用计数与销毁流程，以及属性关键字的实际语义。
 tags:
   - iOS
   - Objective-C
@@ -22,16 +22,19 @@ covers:
 ---
 # Objective-C 内存管理：从 MRC、ARC 到属性关键字
 
-MRC、ARC 和属性关键字不是三套知识。MRC 给出所有权规则，ARC 把规则翻译成编译器插桩与 runtime 操作，属性关键字再把所有权、原子性和接口暴露方式写进类的公开契约。
+MRC、ARC 和属性关键字不是三套知识。MRC 定义谁拥有对象、何时放弃所有权；ARC 把这些规则翻译成编译器插桩和 runtime 操作；属性关键字再把所有权、原子性和接口暴露方式写进类的公开契约。
 
-本文按这条因果链整合原来的三篇文章。原有论证、代码、实验、纠错、参考资料和环境说明全部保留，只调整章节层级、过渡语句和文内导航。
+已经没人写 MRC 了，但所有权规则一天都没有消失。ARC 替你写配平代码，依据恰恰就是下面这四条规则——它是照着规则插的。不知道规则本身，"ARC 到底做了什么"就只能答到"自动管理内存"这个层次。
+
+还有两个更现实的理由。Core Foundation 对象至今要手动 `CFRetain` / `CFRelease`，`__bridge_transfer` 这些关键字表达的就是所有权转移；线上崩溃日志里的过度释放问题，不理解引用计数根本无从下手。
+
+顺带先把本文最硬的一个结论摆在前面：**网上讲 `extra_rc` 占 19 位的文章，在你现在用的模拟器、iPhone XS 起的所有真机、以及所有 Intel Mac 上都是错的，实测是 8 位。** 后面的引用计数章节有完整实验和源码依据。
 
 ---
 
-## 第一部分：MRC 的所有权规则：retain、release 与 autorelease
+## 所有权规则：MRC 是 ARC 的地基
 
-
-### 一、四条规则
+### 四条规则
 
 Apple 的 Memory Management Policy 只有四句话，值得看原文，因为中文转述经常把第一条讲歪。
 
@@ -82,9 +85,7 @@ CF 没有 `alloc`/`new`/`copy` 这四个词，它有自己的一套：
 
 搞清楚这两套方言其实是同一件事，桥接就不用死记了：问一句"这次转换之后，谁负责最后那次 release"。
 
----
-
-### 二、手写一遍，才知道 ARC 删掉了什么
+### 手写一遍，才知道 ARC 删掉了什么
 
 ```objc
 @interface Box : NSObject {
@@ -148,407 +149,18 @@ MRC 和 ARC 的区别不在有没有这些调用，而在谁写的。
 
 ---
 
-### 三、autorelease 解决什么问题
-
-规则第一条说，方法名不匹配那四个前缀，返回的对象调用方就不拥有。那工厂方法该怎么写？
-
-```objc
-Box *makeBox(void) {
-    Box *b = [[Box alloc] init];   // +1，此刻我拥有它
-    return b;                       // 不能 release，一 release 对象就没了
-}                                   // 也不能不 release，那就泄漏了
-```
-
-进退两难。`autorelease` 就是为这个场景造的：
-
-```objc
-Box *makeBox(void) {
-    Box *b = [[Box alloc] init];
-    return [b autorelease];   // 放弃所有权，但推迟到"稍后某个时刻"再真正 release
-}
-```
-
-调用方拿到一个暂时还活着、但不归自己的对象。想留住就自己 `retain`。
-
-"稍后某个时刻"是什么时候，取决于当前自动释放池什么时候排空。第五节末尾会讲。
-
----
-
-### 四、引用计数存在哪：一个能测出来的问题
-
-中文资料在这一节几乎全体过时了，而且过时得很有系统性。
-
-#### nonpointer isa
-
-早期的 isa 就是一个纯类指针，引用计数全部放在一张全局表里，每次 retain/release 都要加锁查表。iOS 7 前后引入 nonpointer isa：64 位指针有大量位闲着，干脆把常用信息塞进去，其中就包括引用计数。
-
-`retain` 的快速路径变成把 isa 里的计数字段加一，用 `ldxr` / `stxr`（ARM64 的独占访问指令）做无锁 CAS 循环，根本不碰锁。只有装不下了才溢出到 SideTable。
-
-关键在于"装不下"的门槛是多少。
-
-#### 两个分支，两套位宽
-
-objc4 的 `isa.h` 里，同一个 `#if __arm64__` 下面有两个分支。
-
-带指针认证的（也包括所有 iOS 模拟器）：
-
-```c
-#define ISA_HAS_CXX_DTOR_BIT 0
-#define ISA_BITFIELD                        \
-    uintptr_t nonpointer        : 1;        \
-    uintptr_t has_assoc         : 1;        \
-    uintptr_t weakly_referenced : 1;        \
-    uintptr_t shiftcls_and_sig  : 52;       \
-    uintptr_t has_sidetable_rc  : 1;        \
-    uintptr_t extra_rc          : 8
-#define RC_HALF              (1ULL<<7)      // = 128
-```
-
-不带指针认证的：
-
-```c
-#define ISA_HAS_CXX_DTOR_BIT 1
-#define ISA_BITFIELD                        \
-    uintptr_t nonpointer        : 1;        \
-    uintptr_t has_assoc         : 1;        \
-    uintptr_t has_cxx_dtor      : 1;        \
-    uintptr_t shiftcls          : 33;       \
-    uintptr_t magic             : 6;        \
-    uintptr_t weakly_referenced : 1;        \
-    uintptr_t unused            : 1;        \
-    uintptr_t has_sidetable_rc  : 1;        \
-    uintptr_t extra_rc          : 19
-#define RC_HALF              (1ULL<<18)     // = 262144
-```
-
-19 位在第二个分支里。指针认证要占掉 52 位来放类指针加签名，`extra_rc` 就只剩 8 位了。
-
-模拟器为什么也走第一个分支，`isa.h` 里有现成的注释：
-
-> ARM64 simulators have a larger address space, so use the ARM64e scheme even when simulators build for ARM64-not-e.
-
-还有一件事几乎没人提：`__x86_64__` 分支的 `extra_rc` **也是 8 位**，`RC_HALF` 同样是 `1ULL<<7`。所以 19 位这个数字在 Intel Mac 上从来就没成立过。它只存在于无指针认证的 arm64 这一个分支里——对应 A7 到 A11，iPhone 5s 到 iPhone X。
-
-顺带纠正一个容易搞混的地方：决定走哪个分支的是 **libobjc 自己怎么编的**（`__has_feature(ptrauth_calls)`），不是你 App 的架构 slice。普通 App 编出来是 arm64 而不是 arm64e，但 A12 起设备的 dyld 共享缓存是 arm64e，libobjc 走的就是 8 位那个分支。
-
-#### 实测
-
-按第一个分支的位域解析 isa，同时读 `CFGetRetainCount` 做对照：
-
-```objc
-static void probe(id obj, const char *tag) {
-    uintptr_t isa = *(uintptr_t *)(__bridge void *)obj;
-    unsigned long extra_rc  = (isa >> 56) & 0xff;
-    unsigned long sidetable = (isa >> 55) & 0x1;
-    long cf = CFGetRetainCount((CFTypeRef)obj);
-    printf("%-16s extra_rc=%-4lu  has_sidetable_rc=%lu  CFGetRetainCount=%-4ld  差值=%ld\n",
-           tag, extra_rc, sidetable, cf, cf - (long)extra_rc);
-}
-```
-
-```text
-刚创建                extra_rc=2     has_sidetable_rc=0  CFGetRetainCount=2     差值=0
-retain 1 次           extra_rc=3     has_sidetable_rc=0  CFGetRetainCount=3     差值=0
-retain 252 次         extra_rc=254   has_sidetable_rc=0  CFGetRetainCount=254   差值=0
-retain 253 次         extra_rc=255   has_sidetable_rc=0  CFGetRetainCount=255   差值=0
-retain 254 次（溢出）  extra_rc=128   has_sidetable_rc=1  CFGetRetainCount=256   差值=128
-```
-
-`extra_rc` 涨到 255 就到顶了，8 位。第 254 次触发溢出，`has_sidetable_rc` 翻成 1，`extra_rc` 回落到 128。
-
-把溢出那一行的 isa 拆开看更清楚：
-
-```text
-0x80 80 0001efeba749
-  │   └── bit55 = 1      → has_sidetable_rc
-  └────── bit56-63 = 0x80 = 128 = RC_HALF
-```
-
-128 正是源码里的 `RC_HALF`。溢出的处理不是把计数全搬去 SideTable，而是留一半在 isa 里、把另一半挪过去。这样后续 release 在 `extra_rc` 减到 0 之前都不用碰锁。
-
-#### 顺带修正一个我自己差点写错的地方
-
-最后一列"差值"恒为 0，这说明 `extra_rc` 直接就是引用计数，不是老文章说的 `retainCount - 1`。源码可以印证——`initIsa` 里是：
-
-```c
-#if ISA_HAS_INLINE_RC
-        newisa.extra_rc = 1;
-#endif
-```
-
-`rootRetainCount()` 也不再 +1：
-
-```c
-uintptr_t rc = bits.extra_rc;
-if (bits.has_sidetable_rc) { rc += sidetable_getExtraRC_nolock(); }
-return rc;
-```
-
-这个语义变化还有一个连带后果，很少有人提：旧版 isa 里有一个独立的 `deallocating` 位，现在没有了。因为 `extra_rc` 既然直接是引用计数，`extra_rc == 0` 天然就表示没人持有：
-
-```cpp
-bool isDeallocating() const {
-    return extra_rc == 0 && has_sidetable_rc == 0;
-}
-```
-
-所以那一位被省掉了。你回头看上面贴的两个位域分支，确实一个 `deallocating` 都找不到。
-
-至于"刚创建"那行为什么是 2 而不是 1——这是 `-O0` 构建，ARC 在把对象传进 `probe` 时多插了一次 retain。剥掉这一次，`1 + 300 = 301`，和跑满 300 次后 `CFGetRetainCount` 的返回值对得上。
-
-#### 别拿 retainCount 调试
-
-上面刚用完这个数字，得马上说清楚它为什么不能信。
-
-首先是 tagged pointer。`rootRetainCount()` 第一行就是特判：
-
-```c
-if (isTaggedPointer()) return (uintptr_t)this;
-```
-
-但实际测出来的结果和这行代码不一样：
-
-```text
-tagged 指针值             = 0xb68cd92197b5cfee
-tagged  [obj retainCount] = 9223372036854775807
-tagged  CFGetRetainCount  = 9223372036854775807
-        retainCount 是否 == 指针值? 0
-堆对象  [obj retainCount] = 1
-```
-
-返回的是 `INT64_MAX` 而不是指针值，因为 `NSNumber` 是 CF 桥接类、有自定义的 retain/release 实现，压根不走 `objc_object::rootRetainCount()`。这个例子挺能说明问题：只读一个函数的源码就下结论，很容易翻车。不管走哪条路，结论都一样——tagged pointer 的引用计数是个没有意义的数。
-
-其次，返回值不包含自动释放池里挂着的待释放次数，所以"看着是 1"和"马上要归零"根本分不出来。常量字符串、单例这类对象返回的也是无意义的极大值。
-
-ARC 下 `retain` / `release` / `autorelease` / `retainCount` 以及显式调用 `dealloc` 一律是编译错误，Clang ARC 规范里有明确清单。这不是"防止你手滑"，是这些操作在 ARC 的语义模型下没有位置。
-
-> 上面这组数据来自 iOS 模拟器（arm64）。模拟器和 arm64e 真机走同一个位域分支，但真机上是否完全一致需要自己复现。代码原样拿到真机跑即可。
-
----
-
-### 五、autorelease 池的实现
-
-自动释放池是一个按页组织的指针栈。objc4 源码的注释说得很清楚：
-
-> A thread's autorelease pool is a stack of pointers. Each pointer is either an object to release, or `POOL_BOUNDARY` which is an autorelease pool boundary... The stack is divided into a doubly-linked list of pages.
-
-哨兵就是 `nil`（`#define POOL_BOUNDARY nil`）。每次 `objc_autoreleasePoolPush` 往栈里压一个 `nil` 当边界，并把这个位置的地址返回；`objc_autoreleasePoolPop` 拿着地址把栈弹回去，沿途每个对象发一次 `release`。嵌套的池就是栈里多个哨兵，天然支持。
-
-页之间用 `parent` / `child` 串成双向链表，线程本地存储里记着当前的热页。`autoreleaseFast` 按三种情况分流：
-
-```c
-static inline id *autoreleaseFast(id obj) {
-    AutoreleasePoolPage *page = hotPage();
-    if (page && !page->full()) {
-        return page->add(obj);                 // 热页有空间
-    } else if (page) {
-        return autoreleaseFullPage(obj, page);  // 热页满了，找或建下一页
-    } else {
-        return autoreleaseNoPage(obj);          // 一页都还没有
-    }
-}
-```
-
-pop 时会把释放过的槽位涂成 `SCRIBBLE = 0xA3`。在 lldb 里读一块刚排空的池内存，能看到成片的 `0xA3A3A3A3`。
-
-关于页大小有个流传很广的说法需要修正。源码里写的确实不是字面常量 4096，而是 `PROTECT_AUTORELEASEPOOL ? PAGE_MAX_SIZE : PAGE_MIN_SIZE`。但 `PROTECT_AUTORELEASEPOOL` 在发布的 objc4 里**根本没有定义**，它是给运行时开发者自己重编 libobjc 时用的开关，不会随 Xcode 的 Debug 构建自动打开。所以实践中 4096 这个数值是对的，错的只是把它当成源码里的硬编码常量。
-
-#### 三个老文章里没有的机制
-
-中文圈关于 autorelease 最经典的两篇写于 2014 年前后，下面这些当时还不存在。今天用新 Xcode 抓到的行为和那些文章的截图对不上，不是你搞错了。
-
-**空池占位符。** 大量自动释放池从创建到销毁一个对象都没装过——RunLoop 每轮迭代都会 push/pop 一个池，但多数迭代里什么都没发生。运行时为此做了优化：如果当前线程只 push 了一个池、且从没真正塞过对象，就把热页指针设成哨兵值 `1`，完全不分配内存。等真要塞第一个对象时才补边界并分配页。
-
-**相邻指针合并。** `objc-config.h` 里 `SUPPORT_AUTORELEASEPOOL_DEDUP_PTRS` 的注释写的是"combine consecutive pointers to the same object"，实现上会回看栈顶最近 4 个条目，命中就在已有条目上递增计数并把它挪到栈顶（LRU），pop 时按计数循环 release。循环里反复 `[NSNumber numberWithInt:]` 是典型受益场景。
-
-**返回值优化让很多 autorelease 根本没入池。** `objc_autoreleaseReturnValue` 会先判断调用方是不是马上就要 retain 这个返回值，是的话对象直接以 +1 状态交出去，通过线程本地存储接力，完全不经过池页。判断方式本身也换过代——`objc-config.h` 里 `HAS_RETURNADDR_AUTORELEASE_ELISION` 在 arm64 上是 1，注释说得很直白：
-
-> autorelease elision based on comparing the return address of the call and claim. When 0, we only support the older scheme that inspects the caller's code for a claim call or sentinel NOP.
-
-也就是说"读调用方指令流找哨兵 NOP"是旧方案，当前 arm64 走的是返回地址比对。对应还多了一个 `objc_claimAutoreleasedReturnValue` 入口，签名注释写着 "without a NOP in the caller on ARM64"。具体机制在下一篇展开。
-
-所以"autorelease 就是把 release 延后"这句话今天已经不完整了。
-
-#### 池什么时候排空
-
-主线程上由 RunLoop 的 observer 负责：进入时 push，即将休眠时 pop 再 push，退出时 pop。所以主线程的 autoreleased 对象最迟活到当前这轮 RunLoop 结束。
-
-子线程麻烦一些。`NSThread` 手动起的线程有隐式池，但排空时机不受你控制；GCD 队列会自动排空，时机同样不保证。所以在子线程跑一个产生大量临时对象的长任务时，得自己套 `@autoreleasepool`，否则内存会一路涨到任务结束。
-
-如果一个对象在完全没有池的上下文里被 autorelease，运行时会打日志：
-
-```text
-Object 0x... of class ... autoreleased with no pool in place - just leaking
-```
-
-这个函数在源码里是 `BREAKPOINT_FUNCTION(void objc_autoreleaseNoPool(id obj))`，意味着你可以直接 `b objc_autoreleaseNoPool` 断在现场。
-
-至于"循环里套 `@autoreleasepool` 能降低内存峰值"这条标准答案，今天需要打个折。套一层池本身有成本（push/pop，可能还要分配页），只有循环体确实产生大量 autoreleased 对象时才划算——`imageWithContentsOfFile:`、`stringWithFormat:`、JSON 解析这类。而且有了上面说的指针合并和返回值优化，2014 年那些 demo 里的效果今天已经明显缩水。先测再改，别照抄。
-
----
-
-### 六、release 到 0 之后
-
-```
-最后一次 release，引用计数归零
-      │  isa 进入 deallocating 状态（extra_rc == 0 && has_sidetable_rc == 0）
-      ▼
-objc_msgSend(this, @selector(dealloc))     ← 真正的消息发送，可被覆写、可被 NSZombie 替换
-      │
--[NSObject dealloc] → _objc_rootDealloc(self)
-      │
-rootDealloc()
-      │
-      ├─ 快速路径：nonpointer && !weakly_referenced && !has_assoc
-      │            && 没有 C++ 析构 && !has_sidetable_rc
-      │            → free(this)，直接结束
-      │
-      └─ 慢速路径：_object_dispose_nonnull_realized
-                    → objc_destructInstance_nonnull_realized
-                        ① object_cxxDestruct   （执行 .cxx_destruct，释放 ARC 托管的 ivar）
-                        ② 移除关联对象
-                        ③ clearDeallocating    （清空所有弱引用、清理 SideTable 残留）
-                    → free
-```
-
-快速路径那个判断值得留意：只要对象没被弱引用过、没挂关联对象、没有 C++ 析构、引用计数没溢出过，销毁就是一句 `free`，整套析构流程全部跳过。
-
-但那四个条件并不都存在 isa 里。前面贴过，ptrauth / 模拟器分支的 `ISA_HAS_CXX_DTOR_BIT` 是 0，位域里根本没有 `has_cxx_dtor`，所以源码在这里分了岔：
-
-```cpp
-#if ISA_HAS_CXX_DTOR_BIT
-                 !isa().has_cxx_dtor                  &&
-#else
-                 !isa().getClass(false)->hasCxxDtor() &&
-#endif
-```
-
-在 x86_64 和无指针认证的 arm64 上它是 isa 位，在 arm64e 和模拟器上要回退去查类对象的标志。又一个位域分支差异的例证。
-
-慢速路径那三步的顺序，源码里有一句注释：`// This order is important.` 但源码没有给理由。合理的推断是：`.cxx_destruct` 要读取并释放各个 ivar，此刻它们必须还有效；如果先清了弱引用表，析构过程中万一有逻辑依赖弱引用语义就会拿到 `nil`。
-
-补一句和上一节呼应的：ARC 下不用写 `[super dealloc]`，也不用手动释放 ivar，是因为这两件事都由编译器合成——ivar 的释放代码进了 `.cxx_destruct`，对父类的转发由编译器在 `-dealloc` 末尾插入。所以第二节里"ARC 下写 `[super dealloc]` 是编译错误"和这里说的是同一件事的两面。
-
-另外，对一个正在 dealloc 的对象注册新的弱引用会直接崩溃（`Cannot form weak reference to instance ... being deallocated`），这条留到 weak 那一篇讲。
-
-#### 所以 dealloc 里该写什么
-
-Apple 的态度很明确：
-
-> You should typically not manage scarce resources such as file descriptors, network connections, and buffers or caches in a `dealloc` method. In particular, you should not design classes so that `dealloc` will be invoked when you think it will be invoked.
-
-理由是 `dealloc` 的调用时机不可控——可能被延迟，可能因为应用退出而根本不执行。
-
-对 iOS 最毒的是线程问题：一个对象的最后一次 release 发生在哪个线程，它的 `dealloc` 就在哪个线程执行。如果某个后台任务持有了最后一个引用，`dealloc` 里碰 UIKit 就直接炸，而且这种崩溃极难复现——它取决于哪条引用链最后一个断开。
-
-`dealloc` 里合适做的事只有一类：解除本对象和外界的关联。移除通知观察者、置空 delegate、取消定时器。真正的资源释放应该有显式的生命周期方法。
-
----
-
-### 七、NSZombie 与它的替代品
-
-过度释放的表现通常是"随机崩溃"——对象已经销毁，指针还在，那块内存要等被别人复用才出问题。所以崩溃点往往离真正的 bug 很远。
-
-`NSZombieEnabled` 的做法是把 `dealloc` 的行为整个换掉。Foundation 没有开源，下面这几步来自社区对反汇编的整理，和 mikeash 那篇重实现一致，不是一手源码：
-
-1. 按原类名找到或复制出一个 `_NSZombie_原类名` 的僵尸类，这个类没有父类、没有任何方法实现，并按类名缓存。
-2. 调 `objc_destructInstance` 做析构（执行 `.cxx_destruct`、清关联对象、清弱引用），但不 free 内存。
-3. 把对象的 isa 改指向僵尸类。
-4. 内存留着不还。
-
-之后任何人再给这个指针发消息，因为僵尸类什么方法都没有，会走消息转发失败路径被拦截，打印出来：
-
-```text
--[Person printName]: message sent to deallocated instance 0x108a08180
-```
-
-随后进程立即终止。这个"立即"才是 zombie 的全部价值——它把一个随机时刻的诡异崩溃换成了一个确定的、可以下断点的崩溃。代价是内存永久泄漏，所以只能调试时开。
-
-今天 zombie 已经不是首选了。**Address Sanitizer** 能抓 use-after-free，而且同时给出分配栈和释放栈，信息量比 zombie 大得多，也不会永久占着内存，Xcode 的 Scheme 里勾一下就行。`MallocStackLogging` 配 `malloc_history <pid> <addr>` 可以拿到那块内存完整的 alloc/free 调用栈，和 zombie 配合用效果最好——zombie 告诉你地址，malloc_history 告诉你是谁释放的。
-
-还有个用工具的常见误区值得单说：Instruments 的 Leaks 只能找到**不可达**的内存，找不到"还被强引用着但一直在涨"的那类问题。后者要用 Allocations 做 Generation 对比。很多人查内存增长时选错了工具，然后得出"没有泄漏"的结论。
-
-顺带一提，`MallocScribble` 会把 free 掉的内存填成 `0x55`，和第五节讲的 `SCRIBBLE = 0xA3` 是同一类技巧。
-
----
-
-### 八、几个已经不准的说法
-
-- **"extra_rc 占 19 位。"** 只在无指针认证的 arm64（A7~A11）上成立。arm64e 真机、所有 iOS 模拟器、以及所有 x86_64 都是 8 位。19 位在 Intel Mac 上从来就没对过。
-- **"isa 里有一个 deallocating 位。"** 现在没有了。`extra_rc` 的语义从 `retainCount - 1` 改成 `retainCount` 之后，`extra_rc == 0 && has_sidetable_rc == 0` 就能表示正在析构，那一位被省掉了。
-- **"AutoreleasePoolPage 固定 4096 字节。"** 数值对，但源码里是平台宏而非字面常量；控制它的 `PROTECT_AUTORELEASEPOOL` 在发布版 objc4 里没有定义。
-- **"NSAutoreleasePool 和 @autoreleasepool 是新旧两种写法。"** `@autoreleasepool {}` 编译后直接调 `objc_autoreleasePoolPush` / `Pop`，走运行时内建的分页栈；`NSAutoreleasePool` 是一个真实的类，走另一套代码路径。效果等价，实现是两条路。老代码里的 `[pool drain]` 则是 GC 时代的遗留，GC 早已移除，今天它和 `release` 没有区别。
-- **"autorelease 就是把 release 延后。"** 返回值优化会让很多 autorelease 调用根本没入池，见第五节。
-- **"过度释放会立刻崩溃。"** 对象销毁后指针没被清空，继续用只是看起来正常，直到那块内存被复用。这就是野指针 bug 难查的根本原因。
-- **"SideTable 是一张全局哈希表。"** 是 `StripedMap<SideTable>`，按对象地址哈希分片，各片独立加锁。分片数在真机上是 8，Mac 和模拟器上是 64。
-- **"retain/release 都是 C 实现的。"** 部分架构上快速路径直接在汇编里，tagged pointer 和 nil 的判断在汇编层就短路了，只有慢速路径才落到 C++ 代码。
-
----
-
-### 总结
-
-四条规则的判定标准是方法名前缀，不是方法实际做了什么。`[s copy]` 返回同一个对象你也得 release，`stringByAppendingString:` 返回新对象你也不能 release——这个契约不讲理，但正因为不讲理才可靠。CF 的 Create/Get Rule 是同一套思想的另一种方言。
-
-引用计数优先存在 nonpointer isa 里。实测在模拟器和 arm64e 上是 8 位，第 254 次 retain 溢出，一半（`RC_HALF` = 128）挪到 SideTable。19 位那个数字只属于 A7~A11。而且 `extra_rc` 现在直接就是引用计数，不是 `retainCount - 1`——这个语义改动顺带干掉了旧版的 `deallocating` 位。
-
-自动释放池是分页的指针栈，哨兵是 `nil`。空池占位符、相邻指针合并、返回值优化这三个机制在 2014 年那批经典文章里都还不存在，今天抓到的行为和那些截图对不上是正常的。
-
-引用计数归零后 `dealloc` 是一次真实的消息发送。如果对象没有弱引用、关联对象、C++ 析构、SideTable 计数，销毁就是一句 `free`。但 `dealloc` 的执行线程取决于谁持有最后一个引用，所以里面不要碰 UIKit，也不要管理稀缺资源。
-
-最后一条方法论：这一篇里所有"网上说的不对"的结论，都不是靠读更多文章得出来的，而是靠按源码的位域定义解析 isa、然后跑一遍看数字对不对。**遇到位宽、常量、时机这类问题，测一次比读十篇文章可靠。**
-
-下一部分是 [[#第二部分：ARC 的两半：编译器插桩与 runtime 支持|ARC 的两半]]。
-
-### 参考资料
-
-#### 官方
-
-- [Memory Management Policy](https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/MemoryMgmt/Articles/mmRules.html)：四条规则的权威措辞
-- [Practical Memory Management](https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/MemoryMgmt/Articles/mmPractical.html)：setter 顺序和 dealloc 禁忌的官方理由
-- [CoreFoundation Ownership Policy](https://developer.apple.com/library/archive/documentation/CoreFoundation/Conceptual/CFMemoryMgmt/Concepts/Ownership.html)：Create Rule / Get Rule
-- [Clang ARC Specification](https://clang.llvm.org/docs/AutomaticReferenceCounting.html)：ARC 下被禁用的方法清单
-- [apple-oss-distributions/objc4](https://github.com/apple-oss-distributions/objc4)：`isa.h` 是所有位宽争议的最终裁判；`objc-config.h` 管着几个关键开关；`NSObject.mm` 里是池的完整实现
-
-#### 经典
-
-- [Always Processing — objc_retain](https://alwaysprocessing.blog/2023/07/22/objc-retain)：少见的跟着当前 objc4 走读的文章，比多数中文教程新
-- [draven — 黑箱中的 retain 和 release](https://draven.co/rr/)：概念讲得清楚，位宽数字已过时
-- [sunnyxx — 黑幕背后的 Autorelease](https://blog.sunnyxx.com/2014/10/15/behind-autorelease/)：中文圈引用率最高的一篇，双向链表和哨兵的说法源头，成文早于第五节那三个新机制
-- [draven — 自动释放池的前世今生](https://draven.co/autoreleasepool/)：三篇里和当前源码吻合度最高的
-
-#### 本地
-
-- [[iOS 对象模型：类型判断、内存对齐与 Tagged Pointer]]
-- [[#第二部分：ARC 的两半：编译器插桩与 runtime 支持|ARC 的两半]]
-
----
-
-实验环境：Xcode 26.6，iOS 模拟器（arm64，Apple Silicon Mac），`clang -target arm64-apple-ios17.0-simulator`，ARC 与 MRC 两份分别构建。
-
-isa 位域实验依赖 objc4 当前的定义，属于实现细节。这个实验真正可复用的是方法本身：照着 `isa.h` 解析位，用实际行为验证源码，而不是相信任何一篇文章给出的数字。
-
-> 待真机补测：同一组实验在 iPhone 15 / iOS 26.5 上复现，确认 arm64e 真机的位宽与溢出临界点是否与模拟器一致。
-
----
-
-## 第二部分：ARC 的两半：编译器插桩与 runtime 支持
+## ARC：规则如何变成代码
 
 面试里问"ARC 是什么"，最常见的回答是"编译器在编译时自动插入 retain 和 release"。这句话不算错，但它把一半的事实说没了。
 
 真正的分工是：编译器决定在哪插、插哪一个函数，运行时决定这个函数具体怎么干。前者是纯静态分析，运行时对此一无所知；后者涉及引用计数存在 isa 的哪几位、要不要加锁、能不能走快速路径，编译器同样一无所知。
 
-有一个地方能把这种分工看得特别清楚——方法返回值的所有权交接。两边谁都看不见对方的代码，只能隔着一个返回地址对暗号。这篇文章最长的一节花在这上面。
-
-本文第一部分 [[#第一部分：MRC 的所有权规则：retain、release 与 autorelease|MRC 的所有权规则]] 讲规则本身，这一部分讲规则怎么被翻译成代码。
+有一个地方能把这种分工看得特别清楚——方法返回值的所有权交接。两边谁都看不见对方的代码，只能隔着一个返回地址对暗号。后面的返回值所有权交接会把这套暗号完整展开。
 
 ---
 ![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260806211750893.png)
 
-
 ![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260806211757541.png)
-
-
-
 
 ### 先看编译器插了什么
 
@@ -617,8 +229,6 @@ void poolScope(void) {               // 自动释放池
 
 `weakDance` 那一行把 weak 三件套完整暴露了：`initWeak` 建槽、`loadWeakRetained` 读、`destroyWeak` 销毁。读一个 weak 变量为什么要 retain，是因为从读出来到用它之间对象可能在别的线程被释放——必须在持锁的前提下把它 retain 住，要么拿到活着的对象，要么拿到 `nil`，不允许有中间态。这部分留给 [[iOS weak 的实现：SideTable 与置 nil 的时机]]。
 
----
-
 ### 那些桩在优化后大部分会消失
 
 同一份代码换成 `-O1`：
@@ -641,9 +251,246 @@ poolScope    poolPush, alloc_init, storeStrong,     poolPush, alloc_init, releas
 
 但它不是万能的。注意 `makeBox` 在 `-O1` 下还剩一个 `autoreleaseReturnValue`——为什么没被消掉？因为这个 pass 只被允许**成对**消除 retain/release，而这次 autorelease 的配对方在别的函数里。跨函数它不敢动。这也解释了为什么发布构建里 ARC 仍然有开销：所有跨越函数边界的所有权转移，都消不掉。
 
-这还顺带解释了第一部分那个小疑点：为什么刚创建的对象读出来 `extra_rc` 是 2 而不是 1。`-O0` 下每个 `id` 参数都会被 `objc_storeStrong` 进一个本地槽位，那次多出来的 retain 是**被调方**在函数体开头做的，不在调用点。换 `-O1` 这个槽位直接消失。
+这个差异也解释了后面引用计数实验里的现象：为什么刚创建的对象读出来 `extra_rc` 是 2 而不是 1。`-O0` 下每个 `id` 参数都会被 `objc_storeStrong` 进一个本地槽位，那次多出来的 retain 是**被调方**在函数体开头做的，不在调用点。换 `-O1` 这个槽位直接消失。
 
 ---
+
+## 引用计数存在哪里
+
+中文资料在这一节几乎全体过时了，而且过时得很有系统性。
+
+### nonpointer isa
+
+早期的 isa 就是一个纯类指针，引用计数全部放在一张全局表里，每次 retain/release 都要加锁查表。iOS 7 前后引入 nonpointer isa：64 位指针有大量位闲着，干脆把常用信息塞进去，其中就包括引用计数。
+
+`retain` 的快速路径变成把 isa 里的计数字段加一，用 `ldxr` / `stxr`（ARM64 的独占访问指令）做无锁 CAS 循环，根本不碰锁。只有装不下了才溢出到 SideTable。
+
+关键在于"装不下"的门槛是多少。
+
+### 两个分支，两套位宽
+
+objc4 的 `isa.h` 里，同一个 `#if __arm64__` 下面有两个分支。
+
+带指针认证的（也包括所有 iOS 模拟器）：
+
+```c
+#define ISA_HAS_CXX_DTOR_BIT 0
+#define ISA_BITFIELD                        \
+    uintptr_t nonpointer        : 1;        \
+    uintptr_t has_assoc         : 1;        \
+    uintptr_t weakly_referenced : 1;        \
+    uintptr_t shiftcls_and_sig  : 52;       \
+    uintptr_t has_sidetable_rc  : 1;        \
+    uintptr_t extra_rc          : 8
+#define RC_HALF              (1ULL<<7)      // = 128
+```
+
+不带指针认证的：
+
+```c
+#define ISA_HAS_CXX_DTOR_BIT 1
+#define ISA_BITFIELD                        \
+    uintptr_t nonpointer        : 1;        \
+    uintptr_t has_assoc         : 1;        \
+    uintptr_t has_cxx_dtor      : 1;        \
+    uintptr_t shiftcls          : 33;       \
+    uintptr_t magic             : 6;        \
+    uintptr_t weakly_referenced : 1;        \
+    uintptr_t unused            : 1;        \
+    uintptr_t has_sidetable_rc  : 1;        \
+    uintptr_t extra_rc          : 19
+#define RC_HALF              (1ULL<<18)     // = 262144
+```
+
+19 位在第二个分支里。指针认证要占掉 52 位来放类指针加签名，`extra_rc` 就只剩 8 位了。
+
+模拟器为什么也走第一个分支，`isa.h` 里有现成的注释：
+
+> ARM64 simulators have a larger address space, so use the ARM64e scheme even when simulators build for ARM64-not-e.
+
+还有一件事几乎没人提：`__x86_64__` 分支的 `extra_rc` **也是 8 位**，`RC_HALF` 同样是 `1ULL<<7`。所以 19 位这个数字在 Intel Mac 上从来就没成立过。它只存在于无指针认证的 arm64 这一个分支里——对应 A7 到 A11，iPhone 5s 到 iPhone X。
+
+顺带纠正一个容易搞混的地方：决定走哪个分支的是 **libobjc 自己怎么编的**（`__has_feature(ptrauth_calls)`），不是你 App 的架构 slice。普通 App 编出来是 arm64 而不是 arm64e，但 A12 起设备的 dyld 共享缓存是 arm64e，libobjc 走的就是 8 位那个分支。
+
+### 实测
+
+按第一个分支的位域解析 isa，同时读 `CFGetRetainCount` 做对照：
+
+```objc
+static void probe(id obj, const char *tag) {
+    uintptr_t isa = *(uintptr_t *)(__bridge void *)obj;
+    unsigned long extra_rc  = (isa >> 56) & 0xff;
+    unsigned long sidetable = (isa >> 55) & 0x1;
+    long cf = CFGetRetainCount((CFTypeRef)obj);
+    printf("%-16s extra_rc=%-4lu  has_sidetable_rc=%lu  CFGetRetainCount=%-4ld  差值=%ld\n",
+           tag, extra_rc, sidetable, cf, cf - (long)extra_rc);
+}
+```
+
+```text
+刚创建                extra_rc=2     has_sidetable_rc=0  CFGetRetainCount=2     差值=0
+retain 1 次           extra_rc=3     has_sidetable_rc=0  CFGetRetainCount=3     差值=0
+retain 252 次         extra_rc=254   has_sidetable_rc=0  CFGetRetainCount=254   差值=0
+retain 253 次         extra_rc=255   has_sidetable_rc=0  CFGetRetainCount=255   差值=0
+retain 254 次（溢出）  extra_rc=128   has_sidetable_rc=1  CFGetRetainCount=256   差值=128
+```
+
+`extra_rc` 涨到 255 就到顶了，8 位。第 254 次触发溢出，`has_sidetable_rc` 翻成 1，`extra_rc` 回落到 128。
+
+把溢出那一行的 isa 拆开看更清楚：
+
+```text
+0x80 80 0001efeba749
+  │   └── bit55 = 1      → has_sidetable_rc
+  └────── bit56-63 = 0x80 = 128 = RC_HALF
+```
+
+128 正是源码里的 `RC_HALF`。溢出的处理不是把计数全搬去 SideTable，而是留一半在 isa 里、把另一半挪过去。这样后续 release 在 `extra_rc` 减到 0 之前都不用碰锁。
+
+### 顺带修正一个我自己差点写错的地方
+
+最后一列"差值"恒为 0，这说明 `extra_rc` 直接就是引用计数，不是老文章说的 `retainCount - 1`。源码可以印证——`initIsa` 里是：
+
+```c
+#if ISA_HAS_INLINE_RC
+        newisa.extra_rc = 1;
+#endif
+```
+
+`rootRetainCount()` 也不再 +1：
+
+```c
+uintptr_t rc = bits.extra_rc;
+if (bits.has_sidetable_rc) { rc += sidetable_getExtraRC_nolock(); }
+return rc;
+```
+
+这个语义变化还有一个连带后果，很少有人提：旧版 isa 里有一个独立的 `deallocating` 位，现在没有了。因为 `extra_rc` 既然直接是引用计数，`extra_rc == 0` 天然就表示没人持有：
+
+```cpp
+bool isDeallocating() const {
+    return extra_rc == 0 && has_sidetable_rc == 0;
+}
+```
+
+所以那一位被省掉了。你回头看上面贴的两个位域分支，确实一个 `deallocating` 都找不到。
+
+至于"刚创建"那行为什么是 2 而不是 1——这是 `-O0` 构建，ARC 在把对象传进 `probe` 时多插了一次 retain。剥掉这一次，`1 + 300 = 301`，和跑满 300 次后 `CFGetRetainCount` 的返回值对得上。
+
+### 别拿 retainCount 调试
+
+上面刚用完这个数字，得马上说清楚它为什么不能信。
+
+首先是 tagged pointer。`rootRetainCount()` 第一行就是特判：
+
+```c
+if (isTaggedPointer()) return (uintptr_t)this;
+```
+
+但实际测出来的结果和这行代码不一样：
+
+```text
+tagged 指针值             = 0xb68cd92197b5cfee
+tagged  [obj retainCount] = 9223372036854775807
+tagged  CFGetRetainCount  = 9223372036854775807
+        retainCount 是否 == 指针值? 0
+堆对象  [obj retainCount] = 1
+```
+
+返回的是 `INT64_MAX` 而不是指针值，因为 `NSNumber` 是 CF 桥接类、有自定义的 retain/release 实现，压根不走 `objc_object::rootRetainCount()`。这个例子挺能说明问题：只读一个函数的源码就下结论，很容易翻车。不管走哪条路，结论都一样——tagged pointer 的引用计数是个没有意义的数。
+
+其次，返回值不包含自动释放池里挂着的待释放次数，所以"看着是 1"和"马上要归零"根本分不出来。常量字符串、单例这类对象返回的也是无意义的极大值。
+
+ARC 下 `retain` / `release` / `autorelease` / `retainCount` 以及显式调用 `dealloc` 一律是编译错误，Clang ARC 规范里有明确清单。这不是"防止你手滑"，是这些操作在 ARC 的语义模型下没有位置。
+
+> 上面这组数据来自 iOS 模拟器（arm64）。模拟器和 arm64e 真机走同一个位域分支，但真机上是否完全一致需要自己复现。代码原样拿到真机跑即可。
+
+---
+
+## Autorelease 与返回值所有权交接
+
+### autorelease 解决什么问题
+
+规则第一条说，方法名不匹配那四个前缀，返回的对象调用方就不拥有。那工厂方法该怎么写？
+
+```objc
+Box *makeBox(void) {
+    Box *b = [[Box alloc] init];   // +1，此刻我拥有它
+    return b;                       // 不能 release，一 release 对象就没了
+}                                   // 也不能不 release，那就泄漏了
+```
+
+进退两难。`autorelease` 就是为这个场景造的：
+
+```objc
+Box *makeBox(void) {
+    Box *b = [[Box alloc] init];
+    return [b autorelease];   // 放弃所有权，但推迟到"稍后某个时刻"再真正 release
+}
+```
+
+调用方拿到一个暂时还活着、但不归自己的对象。想留住就自己 `retain`。
+
+"稍后某个时刻"是什么时候，取决于当前自动释放池什么时候排空。下文的自动释放池会讲。
+
+### 自动释放池的实现
+
+自动释放池是一个按页组织的指针栈。objc4 源码的注释说得很清楚：
+
+> A thread's autorelease pool is a stack of pointers. Each pointer is either an object to release, or `POOL_BOUNDARY` which is an autorelease pool boundary... The stack is divided into a doubly-linked list of pages.
+
+哨兵就是 `nil`（`#define POOL_BOUNDARY nil`）。每次 `objc_autoreleasePoolPush` 往栈里压一个 `nil` 当边界，并把这个位置的地址返回；`objc_autoreleasePoolPop` 拿着地址把栈弹回去，沿途每个对象发一次 `release`。嵌套的池就是栈里多个哨兵，天然支持。
+
+页之间用 `parent` / `child` 串成双向链表，线程本地存储里记着当前的热页。`autoreleaseFast` 按三种情况分流：
+
+```c
+static inline id *autoreleaseFast(id obj) {
+    AutoreleasePoolPage *page = hotPage();
+    if (page && !page->full()) {
+        return page->add(obj);                 // 热页有空间
+    } else if (page) {
+        return autoreleaseFullPage(obj, page);  // 热页满了，找或建下一页
+    } else {
+        return autoreleaseNoPage(obj);          // 一页都还没有
+    }
+}
+```
+
+pop 时会把释放过的槽位涂成 `SCRIBBLE = 0xA3`。在 lldb 里读一块刚排空的池内存，能看到成片的 `0xA3A3A3A3`。
+
+关于页大小有个流传很广的说法需要修正。源码里写的确实不是字面常量 4096，而是 `PROTECT_AUTORELEASEPOOL ? PAGE_MAX_SIZE : PAGE_MIN_SIZE`。但 `PROTECT_AUTORELEASEPOOL` 在发布的 objc4 里**根本没有定义**，它是给运行时开发者自己重编 libobjc 时用的开关，不会随 Xcode 的 Debug 构建自动打开。所以实践中 4096 这个数值是对的，错的只是把它当成源码里的硬编码常量。
+
+#### 三个老文章里没有的机制
+
+中文圈关于 autorelease 最经典的两篇写于 2014 年前后，下面这些当时还不存在。今天用新 Xcode 抓到的行为和那些文章的截图对不上，不是你搞错了。
+
+**空池占位符。** 大量自动释放池从创建到销毁一个对象都没装过——RunLoop 每轮迭代都会 push/pop 一个池，但多数迭代里什么都没发生。运行时为此做了优化：如果当前线程只 push 了一个池、且从没真正塞过对象，就把热页指针设成哨兵值 `1`，完全不分配内存。等真要塞第一个对象时才补边界并分配页。
+
+**相邻指针合并。** `objc-config.h` 里 `SUPPORT_AUTORELEASEPOOL_DEDUP_PTRS` 的注释写的是"combine consecutive pointers to the same object"，实现上会回看栈顶最近 4 个条目，命中就在已有条目上递增计数并把它挪到栈顶（LRU），pop 时按计数循环 release。循环里反复 `[NSNumber numberWithInt:]` 是典型受益场景。
+
+**返回值优化让很多 autorelease 根本没入池。** `objc_autoreleaseReturnValue` 会先判断调用方是不是马上就要 retain 这个返回值，是的话对象直接以 +1 状态交出去，通过线程本地存储接力，完全不经过池页。判断方式本身也换过代——`objc-config.h` 里 `HAS_RETURNADDR_AUTORELEASE_ELISION` 在 arm64 上是 1，注释说得很直白：
+
+> autorelease elision based on comparing the return address of the call and claim. When 0, we only support the older scheme that inspects the caller's code for a claim call or sentinel NOP.
+
+也就是说"读调用方指令流找哨兵 NOP"是旧方案，当前 arm64 走的是返回地址比对。对应还多了一个 `objc_claimAutoreleasedReturnValue` 入口，签名注释写着 "without a NOP in the caller on ARM64"。具体机制在下文的返回值所有权交接中展开。
+
+所以"autorelease 就是把 release 延后"这句话今天已经不完整了。
+
+#### 池什么时候排空
+
+主线程上由 RunLoop 的 observer 负责：进入时 push，即将休眠时 pop 再 push，退出时 pop。所以主线程的 autoreleased 对象最迟活到当前这轮 RunLoop 结束。
+
+子线程麻烦一些。`NSThread` 手动起的线程有隐式池，但排空时机不受你控制；GCD 队列会自动排空，时机同样不保证。所以在子线程跑一个产生大量临时对象的长任务时，得自己套 `@autoreleasepool`，否则内存会一路涨到任务结束。
+
+如果一个对象在完全没有池的上下文里被 autorelease，运行时会打日志：
+
+```text
+Object 0x... of class ... autoreleased with no pool in place - just leaking
+```
+
+这个函数在源码里是 `BREAKPOINT_FUNCTION(void objc_autoreleaseNoPool(id obj))`，意味着你可以直接 `b objc_autoreleaseNoPool` 断在现场。
+
+至于"循环里套 `@autoreleasepool` 能降低内存峰值"这条标准答案，今天需要打个折。套一层池本身有成本（push/pop，可能还要分配页），只有循环体确实产生大量 autoreleased 对象时才划算——`imageWithContentsOfFile:`、`stringWithFormat:`、JSON 解析这类。而且有了上面说的指针合并和返回值优化，2014 年那些 demo 里的效果今天已经明显缩水。先测再改，别照抄。
 
 ### 返回值的所有权交接
 
@@ -688,7 +535,7 @@ note: explicitly declare getter '-copyLabel' with
       __attribute__((objc_method_family(none))) to return an 'unowned' object
 ```
 
-编译器把这些前缀识别成 method family，并隐式给它们加上 `ns_returns_retained`。所以上一篇说的"命名约定纯靠自觉"，在 ARC 时代只对方法**实现**成立，方法**声明**这一侧编译器是会管的。
+编译器把这些前缀识别成 method family，并隐式给它们加上 `ns_returns_retained`。所以前文说的"命名约定纯靠自觉"，在 ARC 时代只对方法**实现**成立，方法**声明**这一侧编译器是会管的。
 
 #### 暗号怎么对
 
@@ -808,7 +655,7 @@ void unsafeSink(Box *b) { __unsafe_unretained NSString *s = [b direct]; }
 
 ---
 
-### 编译器和运行时各自管什么
+## 编译器和运行时各自管什么
 
 编译器管静态的那半边。所有权限定符（`__strong` / `__weak` / `__unsafe_unretained` / `__autoreleasing`）的推导是纯类型系统的事，不需要运行任何代码就能定下来；哪个语法位置该插哪个 `objc_*` 调用，同理。它还负责生成 `.cxx_destruct`、在 `-dealloc` 末尾补上对父类的转发、判断某个调用点能不能替换成 `objc_alloc` 这类快捷入口。
 
@@ -832,7 +679,7 @@ ARC 用到的运行时函数不算多：
 
 `objc_retainAutoreleaseReturnValue` 也是同一种情况。规范给的等价实现是 `objc_autoreleaseReturnValue(objc_retain(value))`，而 objc4 在 arm64 上走的是另一条路，disposition 从 `ReturnAtPlus0` 变成了 `ReturnAtPlus1`。语义不变，实现换了。
 
-#### 合成访问器有一条专门的捷径
+### 合成访问器有一条专门的捷径
 
 合成的 `nonatomic strong` getter，在 `-O0` 下一个 `objc_*` 调用都不生成，就是裸的取地址、load、返回。
 
@@ -857,6 +704,52 @@ Clang ARC 规范并没有为这条捷径背书，它只在 Unretained return val
 顺带说，`objc_retainAutoreleaseReturnValue`（无 d）在我那六个函数里一次都没出现，但它一点都不冷门。任何返回 +0 值的函数都会生成它——上面那个 `direct` 就是。它没出现只是因为我的测试函数要么返回新建对象，要么不返回对象。
 
 ---
+
+## 对象从 release 到销毁
+
+### release 到 0 之后
+
+```
+最后一次 release，引用计数归零
+      │  isa 进入 deallocating 状态（extra_rc == 0 && has_sidetable_rc == 0）
+      ▼
+objc_msgSend(this, @selector(dealloc))     ← 真正的消息发送，可被覆写、可被 NSZombie 替换
+      │
+-[NSObject dealloc] → _objc_rootDealloc(self)
+      │
+rootDealloc()
+      │
+      ├─ 快速路径：nonpointer && !weakly_referenced && !has_assoc
+      │            && 没有 C++ 析构 && !has_sidetable_rc
+      │            → free(this)，直接结束
+      │
+      └─ 慢速路径：_object_dispose_nonnull_realized
+                    → objc_destructInstance_nonnull_realized
+                        ① object_cxxDestruct   （执行 .cxx_destruct，释放 ARC 托管的 ivar）
+                        ② 移除关联对象
+                        ③ clearDeallocating    （清空所有弱引用、清理 SideTable 残留）
+                    → free
+```
+
+快速路径那个判断值得留意：只要对象没被弱引用过、没挂关联对象、没有 C++ 析构、引用计数没溢出过，销毁就是一句 `free`，整套析构流程全部跳过。
+
+但那四个条件并不都存在 isa 里。前面贴过，ptrauth / 模拟器分支的 `ISA_HAS_CXX_DTOR_BIT` 是 0，位域里根本没有 `has_cxx_dtor`，所以源码在这里分了岔：
+
+```cpp
+#if ISA_HAS_CXX_DTOR_BIT
+                 !isa().has_cxx_dtor                  &&
+#else
+                 !isa().getClass(false)->hasCxxDtor() &&
+#endif
+```
+
+在 x86_64 和无指针认证的 arm64 上它是 isa 位，在 arm64e 和模拟器上要回退去查类对象的标志。又一个位域分支差异的例证。
+
+慢速路径那三步的顺序，源码里有一句注释：`// This order is important.` 但源码没有给理由。合理的推断是：`.cxx_destruct` 要读取并释放各个 ivar，此刻它们必须还有效；如果先清了弱引用表，析构过程中万一有逻辑依赖弱引用语义就会拿到 `nil`。
+
+补一句和上一节呼应的：ARC 下不用写 `[super dealloc]`，也不用手动释放 ivar，是因为这两件事都由编译器合成——ivar 的释放代码进了 `.cxx_destruct`，对父类的转发由编译器在 `-dealloc` 末尾插入。所以第二节里"ARC 下写 `[super dealloc]` 是编译错误"和这里说的是同一件事的两面。
+
+另外，对一个正在 dealloc 的对象注册新的弱引用会直接崩溃（`Cannot form weak reference to instance ... being deallocated`），这条留到 weak 那一篇讲。
 
 ### .cxx_destruct 是编译期生成的
 
@@ -888,83 +781,48 @@ for ( ; cls; cls = cls->getSuperclass()) {
 
 ARC 下手写 `[super dealloc]` 会直接编译失败（`ARC forbids explicit message send of 'dealloc'`），因为编译器自己会在 dealloc 末尾发 `objc_msgSendSuper2`。不过要注意，ivar 的销毁和这次转发不是同一个时机——规范说 ivar 是在"控制流进入**根类** dealloc 之后的某个时刻"被销毁的，而且销毁顺序是未指定的。
 
-对象销毁的完整链条在第一部分讲过。这里补一句：如果对象没有弱引用、没有关联对象、没有 C++ 析构、引用计数没溢出过，`rootDealloc` 会走快速路径直接 `free`，`.cxx_destruct` 根本不会被调用。
+上面的流程图已经给出了对象销毁的完整链条。这里补一句：如果对象没有弱引用、没有关联对象、没有 C++ 析构、引用计数没溢出过，`rootDealloc` 会走快速路径直接 `free`，`.cxx_destruct` 根本不会被调用。
 
----
+### 所以 dealloc 里该写什么
 
-### 几个说法需要纠正
+Apple 的态度很明确：
 
-**"ARC 是垃圾回收。"** 不是。GC 要扫描对象图判断可达性，可能有停顿；ARC 是编译期插桩的确定性引用计数，没有扫描、没有停顿。这是两种完全不同的范式，ARC 从来没做过任何图遍历。
+> You should typically not manage scarce resources such as file descriptors, network connections, and buffers or caches in a `dealloc` method. In particular, you should not design classes so that `dealloc` will be invoked when you think it will be invoked.
 
-**"ARC 全是编译器做的，运行时只是被动执行。"** 返回地址差值的判定、`hasCustomRR` 的分支、`extra_rc` 溢出的迁移策略，全都是运行时主动做的动态决策。编译器只负责把调用点摆对位置。
+理由是 `dealloc` 的调用时机不可控——可能被延迟，可能因为应用退出而根本不执行。
 
-**"ARC 会追踪对象之间的引用关系。"** 强引用不追踪。ARC 只维护每个对象自身的一个计数值，谁持有它、持有了几次，全部不记。唯一的例外是 `__weak`——运行时确实在 SideTable 里记着哪些槽指向我，好在销毁时逐个置 `nil`，但这份账不参与计数，也不构成可达性图。所以循环引用无解：检测环需要遍历强引用图，而这张图从来没被建出来过。
+对 iOS 最毒的是线程问题：一个对象的最后一次 release 发生在哪个线程，它的 `dealloc` 就在哪个线程执行。如果某个后台任务持有了最后一个引用，`dealloc` 里碰 UIKit 就直接炸，而且这种崩溃极难复现——它取决于哪条引用链最后一个断开。
 
-**"用了 ARC 就不会内存泄漏。"** 强引用环照样泄漏。Block 捕获 `self` 和 delegate 忘了标 weak 是两个最常见的来源，这个话题在 [[iOS Block 循环引用与 weak-strong dance]] 展开。
+`dealloc` 里合适做的事只有一类：解除本对象和外界的关联。移除通知观察者、置空 delegate、取消定时器。真正的资源释放应该有显式的生命周期方法。
 
-**"`.cxx_destruct` 是运行时动态生成的。"** 是编译期生成的真实方法，能在编译产物的方法列表里找到。
+### NSZombie 与它的替代品
 
-**"返回值优化靠一条固定的 `mov fp, fp` 实现。"** 只有 x86_64 是真的在读指令，而它读的还不是这条；arm64 早就换成返回地址比对了，marker 在那边只是兜底。
+过度释放的表现通常是"随机崩溃"——对象已经销毁，指针还在，那块内存要等被别人复用才出问题。所以崩溃点往往离真正的 bug 很远。
 
----
+`NSZombieEnabled` 的做法是把 `dealloc` 的行为整个换掉。Foundation 没有开源，下面这几步来自社区对反汇编的整理，和 mikeash 那篇重实现一致，不是一手源码：
 
-### 总结
+1. 按原类名找到或复制出一个 `_NSZombie_原类名` 的僵尸类，这个类没有父类、没有任何方法实现，并按类名缓存。
+2. 调 `objc_destructInstance` 做析构（执行 `.cxx_destruct`、清关联对象、清弱引用），但不 free 内存。
+3. 把对象的 isa 改指向僵尸类。
+4. 内存留着不还。
 
-ARC 的分工可以压缩成一句话：编译器做静态的所有权分析并决定插桩位置，运行时做动态的计数与快速路径判定，两边靠一组 `objc_*` 函数对接。
+之后任何人再给这个指针发消息，因为僵尸类什么方法都没有，会走消息转发失败路径被拦截，打印出来：
 
-这句话有一个容易被误读的推论——插桩多不等于开销大。`-O0` 下 `setLabel` 那四个 `storeStrong`，到 `-O1` 一个不剩。但 ARC optimizer 只能成对消除，跨函数的所有权转移它不敢动，这才是发布构建里 ARC 仍有开销的真正原因。
-
-分工最锋利的地方在返回值交接上。两边谁都看不见对方的代码，只能靠一个返回地址对暗号：arm64 把对象扣在 TLS 里等调用方来认领，靠返回地址差值是 4 还是 8 来判断；x86_64 走的仍是老路，从返回地址读机器指令、跳三次确认符号。暗号对不上就退回传统的 autorelease + retain，只赔性能不赔正确性——这个"失败也不会错"的设计，才是它敢在每一次方法调用上生效的原因。
-
-`.cxx_destruct` 是同一套分工的另一个样本，方向反过来：编译器按类生成，运行时按继承链调用，而且在对象满足快速销毁条件时压根不调。
-
-最后一条方法论，和第一部分一样：这篇里几处"网上说的不对"，包括我自己第一版写错的两处，都不是靠读更多文章发现的，而是换个 `-fobjc-runtime` 版本、换个 target、把手写 getter 和合成 getter 摆在一起编一次。凡是来自记忆的断言都出过错，凡是来自编译产物的断言都对。
-
-再往下走就是属性声明如何表达这些所有权语义，也就是本文第三部分；weak 和 Block 的完整机制仍由系列后续专题展开。
-
-### 参考资料
-
-#### 规范与源码
-
-- [Clang ARC Specification](https://clang.llvm.org/docs/AutomaticReferenceCounting.html)：运行时函数清单、method family、unretained return values 的语义定义
-- [objc4 — objc-object.h / NSObject.mm](https://github.com/apple-oss-distributions/objc4)：`callerAcceptsOptimizedReturn`、`prepareOptimizedReturn`、四个返回值优化函数
-- [objc4 — objc-config.h](https://github.com/apple-oss-distributions/objc4)：`HAS_RETURNADDR_AUTORELEASE_ELISION` 这个开关决定了 arm64 走哪条路
-- [llvm-project PR #138696](https://github.com/llvm/llvm-project/pull/138696)：上游 LLVM 支持生成 `objc_claimAutoreleasedReturnValue`，2025 年 5 月
-
-#### 文章
-
-- [Mike Ash — Automatic Reference Counting](https://www.mikeash.com/pyblog/friday-qa-2011-09-30-automatic-reference-counting.html)：ARC 早期最清晰的整体讲解，但文中关于 getter 用哪个返回值优化函数的描述，和现在编译器的实际行为已经对不上
-- [Mike Ash — When an Autorelease Isn't](https://www.mikeash.com/pyblog/friday-qa-2014-05-09-when-an-autorelease-isnt.html)：返回值优化误伤导致过早释放的真实调试案例
-- [sunnyxx — ARC 下 dealloc 过程及 .cxx_destruct 的探究](https://blog.sunnyxx.com/2014/04/02/objc_dig_arc_dealloc/)：用 lldb watchpoint 实测 `.cxx_destruct` 的执行时机，但没提 `rootDealloc` 的快速路径会完全跳过它
-- [Always Processing — objc_retain](https://alwaysprocessing.blog/2023/07/22/objc-retain)：跟着当前 objc4 走读引用计数实现
-
-#### 本地
-
-- [[#第一部分：MRC 的所有权规则：retain、release 与 autorelease|MRC 的所有权规则]]
-- [[#第三部分：属性关键字：从所有权推导，而不是从类型名猜|属性关键字：从所有权推导，而不是从类型名猜]]
-- [[iOS weak 的实现：SideTable 与置 nil 的时机]]
-
----
-
-实验环境：Xcode 26.6（Apple clang 21），target 为 `arm64-apple-ios17.0-simulator` 与 `x86_64-apple-ios17.0-simulator`。
-
-复现命令：
-
-```shell
-SDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
-clang -fobjc-arc -S -emit-llvm -O0 -isysroot "$SDK" \
-      -target arm64-apple-ios17.0-simulator -o out_O0.ll own.m
-clang -fobjc-arc -S -O0 -isysroot "$SDK" \
-      -target x86_64-apple-ios17.0-simulator -o out_x86.s own.m
+```text
+-[Person printName]: message sent to deallocated instance 0x108a08180
 ```
 
-换 `-O1` 再编一遍做对照，差异最明显的是 `setLabel` 和 `useBox`。想看 `objc_alloc_init` 的版本门控，加 `-fobjc-runtime=ios-12.0` 和 `ios-13.0` 各编一次。
+随后进程立即终止。这个"立即"才是 zombie 的全部价值——它把一个随机时刻的诡异崩溃换成了一个确定的、可以下断点的崩溃。代价是内存永久泄漏，所以只能调试时开。
 
-IR 里的函数名带 `llvm.objc.` 前缀，那是 LLVM 的 intrinsic 形式，最终会降级成对同名运行时函数的调用；汇编里看到的才是真实符号 `_objc_storeStrong`。
+今天 zombie 已经不是首选了。**Address Sanitizer** 能抓 use-after-free，而且同时给出分配栈和释放栈，信息量比 zombie 大得多，也不会永久占着内存，Xcode 的 Scheme 里勾一下就行。`MallocStackLogging` 配 `malloc_history <pid> <addr>` 可以拿到那块内存完整的 alloc/free 调用栈，和 zombie 配合用效果最好——zombie 告诉你地址，malloc_history 告诉你是谁释放的。
+
+还有个用工具的常见误区值得单说：Instruments 的 Leaks 只能找到**不可达**的内存，找不到"还被强引用着但一直在涨"的那类问题。后者要用 Allocations 做 Generation 对比。很多人查内存增长时选错了工具，然后得出"没有泄漏"的结论。
+
+顺带一提，`MallocScribble` 会把 free 掉的内存填成 `0x55`，和前面自动释放池里的 `SCRIBBLE = 0xA3` 是同一类技巧。
 
 ---
 
-## 第三部分：属性关键字：从所有权推导，而不是从类型名猜
+## 属性关键字：把所有权写进 API
 
 网上流传的属性关键字口诀大概是这样：NSString 用 copy，delegate 用 weak，Block 用 copy，基本类型用 assign。
 
@@ -982,11 +840,7 @@ IR 里的函数名带 `llvm.objc.` 前缀，那是 LLVM 的 intrinsic 形式，�
 
 本文所有输出块都是真跑出来的，环境是 Xcode 26.6 加 iOS 模拟器（arm64），完整配置放在文末。
 
----
-
-### 一、所有权那一栏
-
-#### 编译器到底生成了什么
+### 编译器到底生成了什么
 
 讲属性关键字最有效的方式是直接看编译器生成的访问器。这里有个分野：并不是所有属性的访问器都长得一样，它们分成两条完全不同的路径。
 
@@ -1026,7 +880,7 @@ if (IsCopy) {
 -[C setNStrong:]   llvm.objc.storeStrong
 ```
 
-这个更正对后面是加分的——第三节那个经典崩溃的根源，正是 setter 里那次真实的 `copyWithZone:` 调用。既然连 `nonatomic copy` 都进了运行时函数，这个因果就更硬。
+这个更正对后面是加分的——后面 copy 修饰可变类型时的经典崩溃的根源，正是 setter 里那次真实的 `copyWithZone:` 调用。既然连 `nonatomic copy` 都进了运行时函数，这个因果就更硬。
 
 几个运行时访问器的签名：
 
@@ -1084,7 +938,7 @@ static inline void reallySetProperty(id self, SEL _cmd, id newValue, ptrdiff_t o
 
 这段代码里有三个地方是特意这么写的。
 
-`copy` 关键字对应的调用是 `copyWithZone:`，不是 `mutableCopyWithZone:`。记住这一行，第三节整节都是它的后果。
+`copy` 关键字对应的调用是 `copyWithZone:`，不是 `mutableCopyWithZone:`。记住这一行，下文的 copy 章节都是它的后果。
 
 锁的粒度。`PropertyLocks` 是一个 `StripedMap`，按 ivar 地址分片。而分片数——
 
@@ -1116,7 +970,7 @@ id objc_getProperty(id self, SEL _cmd, ptrdiff_t offset, BOOL atomic) {
 
 这个 getter 说明了 atomic 唯一真正提供的保证：返回值在调用方拿到它之前不会被别的线程释放掉。它在锁的保护下把对象 retain 住了。至于调用方拿到之后要干什么、期间属性有没有被改成别的对象，atomic 一概不管。
 
-#### 五个所有权关键字
+### 五个所有权关键字
 
 **`strong`** 是对象属性的默认值，语义是"我拥有它，它至少要活得和我一样久"。setter 展开成 `objc_storeStrong`，内部顺序是先 retain 新值、再赋值、最后 release 旧值。这个顺序不能颠倒——新旧是同一个对象且引用计数为 1 时，先 release 会直接把它干掉。
 
@@ -1130,7 +984,7 @@ id objc_getProperty(id self, SEL _cmd, ptrdiff_t offset, BOOL atomic) {
 
 我在 code review 里看到 `assign` 修饰对象一律打回，不听解释。想要那个语义就写 `unsafe_unretained`，让下一个读代码的人知道你是故意的。
 
-#### weak 与 unsafe_unretained 的实测差异
+### weak 与 unsafe_unretained 的实测差异
 
 ```objc
 __weak id weakRef = nil;
@@ -1160,9 +1014,7 @@ __unsafe_unretained id unsafeRef = nil;
 
 关于 delegate 为什么用 weak，流行的解释是"防止循环引用"。这个说法不算错，但把因果讲反了。真正的理由是所有权方向：`UITableView` 不应该拥有它的 delegate，因为那通常是一个更上层、生命周期更长的对象。循环引用只是用错 strong 之后的一个后果。按所有权推导，答案是唯一的；按"防循环引用"推导，遇到没有环的场景就不知道该选什么了。
 
----
-
-### 二、copy 不是深拷贝
+### copy 不是深拷贝
 
 #### 不可变对象的 copy 返回的是它自己
 
@@ -1262,9 +1114,7 @@ initWithArray:copyItems: 容器 0x600000004060 (变了=1)  元素 0x90231e27fe1d
 
 这个 bug 恶劣在它不在赋值那一行崩，而在后面某个使用点崩，堆栈里看到的是一个类型对不上的对象，很容易怀疑到别的地方去。`copy` 只能用于不可变类型的属性声明。想要一个属性既独立又可变，得自己在 setter 里 `mutableCopy`——前面说过，语言层面没给你这个关键字。
 
----
-
-### 三、atomic：一个能证伪自己的实验
+### atomic：一个能证伪自己的实验
 
 #### 先看数据
 
@@ -1339,9 +1189,7 @@ Apple 官方文档在 "Properties Are Atomic by Default" 那一节的注释框�
 
 `nonatomic` 是不是就完全没风险？严格说也不是。指针本身的对齐写入在 arm64 上是原子的，但 ARC 插入的 retain/release 和指针写入不是一个整体，并发场景下理论上存在过度释放的窗口。这个窗口很窄，实践中很少直接触发。真要跨线程读写同一个属性，答案不是在这两个关键字之间挑，而是加同步。
 
----
-
-### 四、Block 属性：copy 还是 strong
+### Block 属性：copy 还是 strong
 
 这场争论其实早有答案，只是它写在 clang 的 AST 头文件里而不是文档里：
 
@@ -1366,9 +1214,7 @@ warning: retain'ed block property does not copy the block
 
 我自己还是写 `copy`。理由不是怕出 bug（现在证明了不会），而是可读性——`copy` 明确告诉读代码的人这里发生了一次从栈到堆的搬迁。Block 在栈和堆之间搬迁的机制本身，放在 [[iOS Block 的结构：ABI、descriptor 与三种类型]] 里讲。
 
----
-
-### 五、剩下那些不常被问到的
+### 剩下那些不常被问到的
 
 **`readonly`** 拦得住编译器，拦不住 KVC。`setValue:forKey:` 照样能改到底层 ivar。它表达的是接口契约。常见搭配是头文件里声明 `readonly`，在 `.m` 的 class extension 里重新声明成 `readwrite`——class extension 里重声明的属性会正常合成，做到对外只读、对内可写。
 
@@ -1388,9 +1234,7 @@ warning: retain'ed block property does not copy the block
 
 category 里写 `@property` 同样不生成 ivar，常规做法是用关联对象模拟存储或者标 `@dynamic`。但这里有个坑：clang 只在存在对应的 `@implementation Cat (A)` 时才警告；如果 category 只有接口声明没有实现块，编译器一声不吭，`-Wall` 也不响，运行时直接 `unrecognized selector`。所以你会看到一个编译得干干净净、跑起来必崩的 category。
 
----
-
-### 六、怎么选
+### 怎么选
 
 把决策顺序写成一串问题，比记表管用：
 
@@ -1415,49 +1259,115 @@ category 里写 `@property` 同样不生成 ivar，常规做法是用关联对�
 
 ---
 
-### 总结
+## 常见误区与修正
 
-三栏正交——所有权、原子性、暴露方式，各选各的。看到一个新属性，按这三个问题过一遍，不要回忆表格。
+### MRC 与 runtime
 
-`copy` 属性的 setter 真的会调 `copyWithZone:`，连 `nonatomic copy` 也走运行时函数。所以它只能修饰不可变类型，第三节那个 `unrecognized selector` 就是这一行的直接后果。
+- **"extra_rc 占 19 位。"** 只在无指针认证的 arm64（A7~A11）上成立。arm64e 真机、所有 iOS 模拟器、以及所有 x86_64 都是 8 位。19 位在 Intel Mac 上从来就没对过。
+- **"isa 里有一个 deallocating 位。"** 现在没有了。`extra_rc` 的语义从 `retainCount - 1` 改成 `retainCount` 之后，`extra_rc == 0 && has_sidetable_rc == 0` 就能表示正在析构，那一位被省掉了。
+- **"AutoreleasePoolPage 固定 4096 字节。"** 数值对，但源码里是平台宏而非字面常量；控制它的 `PROTECT_AUTORELEASEPOOL` 在发布版 objc4 里没有定义。
+- **"NSAutoreleasePool 和 @autoreleasepool 是新旧两种写法。"** `@autoreleasepool {}` 编译后直接调 `objc_autoreleasePoolPush` / `Pop`，走运行时内建的分页栈；`NSAutoreleasePool` 是一个真实的类，走另一套代码路径。效果等价，实现是两条路。老代码里的 `[pool drain]` 则是 GC 时代的遗留，GC 早已移除，今天它和 `release` 没有区别。
+- **"autorelease 就是把 release 延后。"** 返回值优化会让很多 autorelease 调用根本没入池，见前面的自动释放池与返回值所有权交接。
+- **"过度释放会立刻崩溃。"** 对象销毁后指针没被清空，继续用只是看起来正常，直到那块内存被复用。这就是野指针 bug 难查的根本原因。
+- **"SideTable 是一张全局哈希表。"** 是 `StripedMap<SideTable>`，按对象地址哈希分片，各片独立加锁。分片数在真机上是 8，Mac 和模拟器上是 64。
+- **"retain/release 都是 C 实现的。"** 部分架构上快速路径直接在汇编里，tagged pointer 和 nil 的判断在汇编层就短路了，只有慢速路径才落到 C++ 代码。
 
-`copy` 不是深拷贝，`mutableCopy` 也不是。它们都只处理最外面那一层，不可变对象的 `copy` 甚至连新对象都不造。
+### ARC
 
-`atomic` 保护的是单次访问不撕裂，仅此而已。对标量属性它连一条额外指令都不生成，`atomic` 和 `nonatomic` 编译出来是同一份机器码。需要线程安全就往上一层加锁，别在这两个关键字之间挑。
+**"ARC 是垃圾回收。"** 不是。GC 要扫描对象图判断可达性，可能有停顿；ARC 是编译期插桩的确定性引用计数，没有扫描、没有停顿。这是两种完全不同的范式，ARC 从来没做过任何图遍历。
 
-### 参考资料
+**"ARC 全是编译器做的，运行时只是被动执行。"** 返回地址差值的判定、`hasCustomRR` 的分支、`extra_rc` 溢出的迁移策略，全都是运行时主动做的动态决策。编译器只负责把调用点摆对位置。
 
-#### 官方与源码
+**"ARC 会追踪对象之间的引用关系。"** 强引用不追踪。ARC 只维护每个对象自身的一个计数值，谁持有它、持有了几次，全部不记。唯一的例外是 `__weak`——运行时确实在 SideTable 里记着哪些槽指向我，好在销毁时逐个置 `nil`，但这份账不参与计数，也不构成可达性图。所以循环引用无解：检测环需要遍历强引用图，而这张图从来没被建出来过。
 
-- [Apple — Encapsulating Data](https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/ProgrammingWithObjectiveC/EncapsulatingData/EncapsulatingData.html)：atomicity 与 thread safety 的官方措辞出自 "Properties Are Atomic by Default" 一节的注释框
+**"用了 ARC 就不会内存泄漏。"** 强引用环照样泄漏。Block 捕获 `self` 和 delegate 忘了标 weak 是两个最常见的来源，这个话题在 [[iOS Block 循环引用与 weak-strong dance]] 展开。
+
+**"`.cxx_destruct` 是运行时动态生成的。"** 是编译期生成的真实方法，能在编译产物的方法列表里找到。
+
+**"返回值优化靠一条固定的 `mov fp, fp` 实现。"** 只有 x86_64 是真的在读指令，而它读的还不是这条；arm64 早就换成返回地址比对了，marker 在那边只是兜底。
+
+---
+
+## 总结
+
+Objective-C 内存管理的地基始终是四条所有权规则。判断依据是方法名前缀，不是方法实际有没有创建新对象；CF 的 Create/Get Rule 只是同一套所有权契约的另一种方言。
+
+MRC 要求开发者手工配平，ARC 则由编译器决定在何处插入 `objc_retain`、`objc_release`、`objc_storeStrong` 等调用，再由 runtime 完成动态计数、加锁和快速路径。`-O0` 里桩很多不代表发布构建同样昂贵，ObjCARC optimizer 会消掉能在函数内配对的操作，真正难以消除的是跨函数所有权转移。
+
+引用计数优先存在 nonpointer isa。模拟器和 arm64e 上的 `extra_rc` 是 8 位，第 254 次 retain 溢出时把一半计数搬进 SideTable；19 位只属于无指针认证的 arm64。`extra_rc` 现在直接表示引用计数，也因此不再需要旧版独立的 `deallocating` 位。
+
+AutoreleasePool 是带 `nil` 边界的分页指针栈，但现代 runtime 还有空池占位符、相邻指针合并和返回值优化。arm64 通过 TLS 与返回地址差值完成返回值所有权握手，x86_64 仍从返回地址读取指令序列；握手失败只会退回传统 autorelease + retain，不影响正确性。
+
+引用计数归零后，`dealloc` 是一次真实消息发送。满足条件时 `rootDealloc` 可以直接 `free`；否则 runtime 会执行编译器生成的 `.cxx_destruct`、移除关联对象、清空 weak，再释放内存。最后一次 release 在哪个线程发生，`dealloc` 就在哪个线程执行，因此不要把 UIKit 或稀缺资源的生命周期寄托在它上面。
+
+属性关键字要分三栏推导：所有权、原子性、暴露方式。`copy` 表达所有权隔离，不等于深拷贝；`weak` 表达不拥有并在销毁时置 `nil`；`atomic` 只保护单次访问，不提供对象级线程安全，标量属性在 arm64 上甚至与 `nonatomic` 生成相同机器码。
+
+贯穿全文的方法只有一个：遇到位宽、常量、调用顺序和性能结论，不靠记忆和转述，直接对照当前源码、LLVM IR、汇编和最小实验。
+
+---
+
+## 参考资料
+
+### 官方规范与文档
+
+- [Memory Management Policy](https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/MemoryMgmt/Articles/mmRules.html)：四条所有权规则的权威措辞
+- [Practical Memory Management](https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/MemoryMgmt/Articles/mmPractical.html)：setter 顺序与 `dealloc` 禁忌
+- [CoreFoundation Ownership Policy](https://developer.apple.com/library/archive/documentation/CoreFoundation/Conceptual/CFMemoryMgmt/Concepts/Ownership.html)：Create Rule / Get Rule
+- [Clang ARC Specification](https://clang.llvm.org/docs/AutomaticReferenceCounting.html)：method family、所有权限定符、运行时函数与 unretained return value 语义
+- [Apple — Encapsulating Data](https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/ProgrammingWithObjectiveC/EncapsulatingData/EncapsulatingData.html)：属性原子性与线程安全的边界
 - [Apple — NSCopying](https://developer.apple.com/documentation/foundation/nscopying)
-- [objc4 — objc-accessors.mm](https://github.com/apple-oss-distributions/objc4)：`objc_getProperty` / `reallySetProperty` 的完整实现
-- [objc4 — objc-private.h](https://github.com/apple-oss-distributions/objc4)：`StripedMap` 的分片数
-- [clang — CGObjC.cpp](https://github.com/llvm/llvm-project)：`PropertyImplStrategy` 决定了本文第一节那张分路表
-- [clang — DeclObjC.h](https://github.com/llvm/llvm-project)：`getSetterKind`，block 属性上 `strong` 等价于 `copy` 的依据
 
-#### 经典
+### Runtime 与编译器源码
 
-- [objc.io — Value Objects](https://www.objc.io/issues/7-foundation/value-objects/)：解释了为什么不可变类的 `copyWithZone:` 应该 retain 而不是真拷贝
+- [apple-oss-distributions/objc4](https://github.com/apple-oss-distributions/objc4)：`isa.h`、`objc-config.h`、`NSObject.mm`、`objc-object.h`、`objc-accessors.mm` 与 `objc-private.h`
+- [llvm-project](https://github.com/llvm/llvm-project)：`CGObjC.cpp` 的 `PropertyImplStrategy` 与 `DeclObjC.h` 的 Block setter 规则
+- [llvm-project PR #138696](https://github.com/llvm/llvm-project/pull/138696)：LLVM 生成 `objc_claimAutoreleasedReturnValue` 的支持
 
-#### 本地
+### 文章
+
+- [Always Processing — objc_retain](https://alwaysprocessing.blog/2023/07/22/objc-retain)：按当前 objc4 走读引用计数实现
+- [draven — 黑箱中的 retain 和 release](https://draven.co/rr/)：概念清晰，但部分位宽数字已过时
+- [sunnyxx — 黑幕背后的 Autorelease](https://blog.sunnyxx.com/2014/10/15/behind-autorelease/)：AutoreleasePool 双向链表与哨兵的经典讲解，早于空池占位、指针合并和新版返回值优化
+- [draven — 自动释放池的前世今生](https://draven.co/autoreleasepool/)：与当前源码吻合度较高的 AutoreleasePool 文章
+- [Mike Ash — Automatic Reference Counting](https://www.mikeash.com/pyblog/friday-qa-2011-09-30-automatic-reference-counting.html)：ARC 的整体讲解，部分 getter 行为与当前编译器不同
+- [Mike Ash — When an Autorelease Isn't](https://www.mikeash.com/pyblog/friday-qa-2014-05-09-when-an-autorelease-isnt.html)：返回值优化导致过早释放的真实案例
+- [sunnyxx — ARC 下 dealloc 过程及 .cxx_destruct 的探究](https://blog.sunnyxx.com/2014/04/02/objc_dig_arc_dealloc/)：`.cxx_destruct` 执行时机
+- [objc.io — Value Objects](https://www.objc.io/issues/7-foundation/value-objects/)：不可变类的 `copyWithZone:` 为什么可以直接 retain
+
+### 相关本地专题
 
 - [[iOS 对象模型：类型判断、内存对齐与 Tagged Pointer]]
 - [[iOS weak 的实现：SideTable 与置 nil 的时机]]
 - [[iOS Block 的结构：ABI、descriptor 与三种类型]]
+- [[iOS Block 循环引用与 weak-strong dance]]
+- [[iOS AutoreleasePool：哨兵、页链表与 RunLoop 的关系]]
 
 ---
 
-实验环境：Xcode 26.6，iOS 模拟器（arm64，Apple Silicon Mac），`clang -fobjc-arc -target arm64-apple-ios17.0-simulator`，`xcrun simctl spawn booted` 运行。
+## 实验环境与复现
 
-第一节那张分路表不是从文档抄的，是编译出来的：
+全文实验使用 Xcode 26.6（Apple clang 21）与 Apple Silicon Mac。主要 target 是 `arm64-apple-ios17.0-simulator`，返回值握手另用 `x86_64-apple-ios17.0-simulator` 对照；模拟器程序通过 `xcrun simctl spawn booted` 运行。MRC 与 ARC 版本分别构建。
+
+ARC 的 LLVM IR 与双架构汇编：
+
+```shell
+SDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
+clang -fobjc-arc -S -emit-llvm -O0 -isysroot "$SDK" \
+      -target arm64-apple-ios17.0-simulator -o out_O0.ll own.m
+clang -fobjc-arc -S -O0 -isysroot "$SDK" \
+      -target x86_64-apple-ios17.0-simulator -o out_x86.s own.m
+```
+
+换成 `-O1` 可以观察 ObjCARC optimizer，`-fobjc-runtime=ios-12.0` 与 `ios-13.0` 可以验证 `objc_alloc_init` 的版本门控。IR 中的 `llvm.objc.*` 是 intrinsic，最终汇编里的 `_objc_*` 才是真实运行时符号。
+
+属性访问器分路表通过下面的命令生成：
 
 ```shell
 clang -fobjc-arc -target arm64-apple-ios17.0-simulator -S -emit-llvm T.m -o T.ll
 ```
 
-然后在 `T.ll` 里 grep 每个 setter 调了什么。想看汇编把 `-emit-llvm` 换成 `-O2`。这比下符号断点快，也不会漏掉被内联的情况。
+在 `T.ll` 中检查每个 setter/getter 的调用；需要汇编时把 `-emit-llvm` 换成 `-O2`。这种方式比逐个下符号断点更直接，也不会漏掉内联路径。
 
-两点偏差需要注意。并发实验的具体数字每次都不同，能引用的只有"大量丢失"和"加锁后精确"这两个结论。Foundation 的内部类名（`__NSSingleObjectArrayI`、`__NSCFString` 等）属于实现细节，不同系统版本可能变化。
+isa 位域实验依赖当前 objc4 定义，方法是照着 `isa.h` 解析实际位值，再用运行结果核对，而不是相信文章中的固定数字。待真机补测项仍是：在 iPhone 15 / iOS 26.5 上复现同一组 retain 溢出实验，确认 arm64e 真机的位宽与临界点。
 
-还有一处环境差异会影响结论外推：`PropertyLocks` 的分片数在模拟器上是 64，真机上只有 8。本文关于锁争用的讨论在真机上会更严重，模拟器的数据不能直接搬过去。
+并发实验的具体计数每次不同，只能引用大量丢失与加锁后精确这两个稳定结论。Foundation 内部类名属于实现细节，系统版本变化后可能不同。`PropertyLocks` 在模拟器上有 64 个分片，真机只有 8 个，因此模拟器上的锁争用数据不能直接外推到真机。

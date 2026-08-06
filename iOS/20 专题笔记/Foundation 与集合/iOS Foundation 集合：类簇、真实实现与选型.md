@@ -27,7 +27,7 @@ draft: true
 
 这篇把 `NSArray` / `NSDictionary` / `NSSet` 挖到能拿数字说话的程度。最值钱的两条在第三节和第四节。一条是可变数组的存储是个真正的环，另一条是 `copy` 早就成了写时复制。第九节的选型建议，每条都挂着前面某个实验的数字。
 
-类簇和 `isKindOfClass:` 的关系、tagged pointer 的位布局，在 [[iOS 对象模型：类型判断、内存对齐与 Tagged Pointer]] 里讲过。`copy` 修饰容器属性引发的那个必然崩溃，在 [[iOS 内存管理：从 MRC、ARC 到属性关键字#第三部分：属性关键字：从所有权推导，而不是从类型名猜|属性关键字：从所有权推导，而不是从类型名猜]] 里。两处只引用，不重讲。
+类簇和 `isKindOfClass:` 的关系、tagged pointer 的位布局，在 [[iOS 对象模型：类型判断、内存对齐与 Tagged Pointer]] 里讲过。`copy` 修饰容器属性引发的那个必然崩溃，在 [[iOS 内存管理：从 MRC、ARC 到属性关键字#属性关键字：把所有权写进 API|属性关键字：从所有权推导，而不是从类型名猜]] 里。两处只引用，不重讲。
 
 ---
 
@@ -752,7 +752,7 @@ tagged NSNumber           CFGetRetainCount = 9223372036854775807   = INT64_MAX
 
 不可变容器没有拿到哨兵值。`__NSArrayI` 返回的是真实引用计数 2。一个来自变量本身，一个来自 ARC 在 `-O0` 下传参时插的 retain。"不可变对象引用计数是极大值"这个印象，只对常量字符串和 tagged pointer 成立。
 
-而"极大值"本身有三种。[[iOS 内存管理：从 MRC、ARC 到属性关键字#第一部分：MRC 的所有权规则：retain、release 与 autorelease|MRC 的所有权规则]] 里测过 tagged `NSNumber` 是 `INT64_MAX`，这次对上了。另外两种是新的：`-1` 归编译期常量对象和共享缓存里的单例，`0x0FFFFFFFFFFFFFFF` 归 `__NSCFConstantString`。三条路，三个魔数，再一次说明这个数不能拿来做任何判断。
+而"极大值"本身有三种。[[iOS 内存管理：从 MRC、ARC 到属性关键字#引用计数存在哪里|MRC 的所有权规则]] 里测过 tagged `NSNumber` 是 `INT64_MAX`，这次对上了。另外两种是新的：`-1` 归编译期常量对象和共享缓存里的单例，`0x0FFFFFFFFFFFFFFF` 归 `__NSCFConstantString`。三条路，三个魔数，再一次说明这个数不能拿来做任何判断。
 
 ---
 
@@ -919,8 +919,8 @@ buckets=4523  capacity=2795   0.618
 ### 本地
 
 - [[iOS 对象模型：类型判断、内存对齐与 Tagged Pointer]]：类簇与 `isKindOfClass:`、tagged pointer 的位布局
-- [[iOS 内存管理：从 MRC、ARC 到属性关键字#第三部分：属性关键字：从所有权推导，而不是从类型名猜|属性关键字：从所有权推导，而不是从类型名猜]]：`copy` 修饰容器属性的崩溃
-- [[iOS 内存管理：从 MRC、ARC 到属性关键字#第一部分：MRC 的所有权规则：retain、release 与 autorelease|MRC 的所有权规则]]：`retainCount` 为什么不能信
+- [[iOS 内存管理：从 MRC、ARC 到属性关键字#属性关键字：把所有权写进 API|属性关键字：从所有权推导，而不是从类型名猜]]：`copy` 修饰容器属性的崩溃
+- [[iOS 内存管理：从 MRC、ARC 到属性关键字#引用计数存在哪里|MRC 的所有权规则]]：`retainCount` 为什么不能信
 - [[iOS Mach-O：结构、符号绑定与 chained fixups]]：`__DATA` 段里的常量对象与外部类符号
 
 ---

@@ -22,7 +22,7 @@ draft: true
 
 第一反应当然是我数错了，或者哪个对象被合并了。都不是。少掉的那个躺在线程本地存储里，它要等下一次 `autorelease` 把它挤进来。这个行为在中文资料里我一篇都没见过，而它恰好是理解今天这套机制的入口。
 
-本文只管池本身：数据结构、哨兵、页链表、push/pop、线程绑定、嵌套，以及池和 RunLoop 的那一段接缝。RunLoop 的 mode/source/observer 是 [[iOS RunLoop：mode、source 与那张流程图今天还对不对]] 的活。池的基本形状在 [[iOS 内存管理：从 MRC、ARC 到属性关键字#第一部分：MRC 的所有权规则：retain、release 与 autorelease|MRC 的所有权规则]] 第五节已经描过一遍，这篇负责把每个数字都测出来，顺便修两处我自己在那篇里写得不够准的地方。
+本文只管池本身：数据结构、哨兵、页链表、push/pop、线程绑定、嵌套，以及池和 RunLoop 的那一段接缝。RunLoop 的 mode/source/observer 是 [[iOS RunLoop：mode、source 与那张流程图今天还对不对]] 的活。池的基本形状在 [[iOS 内存管理：从 MRC、ARC 到属性关键字#Autorelease 与返回值所有权交接|MRC 的所有权规则]] 第五节已经描过一遍，这篇负责把每个数字都测出来，顺便修两处我自己在那篇里写得不够准的地方。
 
 三条先摆在前面：
 
@@ -260,7 +260,7 @@ return true;
 
 所以每一次普通的 `objc_autorelease` 都会先把对象扣在 TLS 里，连同返回地址一起，然后直接返回。它压根没进页。等下一次有对象要入池，或者有人 push/pop，`moveTLSAutoreleaseToPool` 才把上一个挪进去。
 
-这不是返回值优化的副产品，是 `autorelease` 本身现在的第一步。[[iOS 内存管理：从 MRC、ARC 到属性关键字#第二部分：ARC 的两半：编译器插桩与 runtime 支持|ARC 的两半]] 里讲的 `objc_autoreleaseReturnValue` 走的是同一个 `prepareOptimizedReturn`，只是 `cameFromRootAutorelease` 传 `false`，多一道关卡而已。
+这不是返回值优化的副产品，是 `autorelease` 本身现在的第一步。[[iOS 内存管理：从 MRC、ARC 到属性关键字#Autorelease 与返回值所有权交接|ARC 的两半]] 里讲的 `objc_autoreleaseReturnValue` 走的是同一个 `prepareOptimizedReturn`，只是 `cameFromRootAutorelease` 传 `false`，多一道关卡而已。
 
 我的判断是：任何靠"数池里有几个对象"来推断行为的实验，都得先把这个差一算进去，否则每个数都对不上。我第一版就是被它坑了半小时。
 
@@ -671,8 +671,8 @@ __UIApplicationInstallAutoreleasePoolsIfNecessaryForMode:
 
 ### 本地
 
-- [[iOS 内存管理：从 MRC、ARC 到属性关键字#第一部分：MRC 的所有权规则：retain、release 与 autorelease|MRC 的所有权规则]]
-- [[iOS 内存管理：从 MRC、ARC 到属性关键字#第二部分：ARC 的两半：编译器插桩与 runtime 支持|ARC 的两半]]
+- [[iOS 内存管理：从 MRC、ARC 到属性关键字#Autorelease 与返回值所有权交接|MRC 的所有权规则]]
+- [[iOS 内存管理：从 MRC、ARC 到属性关键字#Autorelease 与返回值所有权交接|ARC 的两半]]
 - [[iOS 内存：Clean、Dirty、Compressed 与 Memory Footprint]]
 - [[iOS RunLoop：mode、source 与那张流程图今天还对不对]]
 
