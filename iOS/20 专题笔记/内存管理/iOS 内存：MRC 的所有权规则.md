@@ -184,6 +184,8 @@ Objective-C 对象与 Core Foundation 对象桥接时，三个关键字分别表
 
 ## 二、MRC 怎样保存一个对象
 
+这部分推荐以下博客辅助理解：[](https://itcharge.cn/blogs/tech/ios/memory-management-01/#_3-5-2-%E5%A4%9A%E4%B8%AA%E5%AF%B9%E8%B1%A1%E5%86%85%E5%AD%98%E7%AE%A1%E7%90%86%E6%80%9D%E6%83%B3)
+
 下面的 `Box` 需要保存传入的字符串。setter 取得新值的所有权，同时放弃旧值的所有权：
 
 ```objc
