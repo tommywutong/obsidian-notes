@@ -762,20 +762,6 @@ Instruments 的 Leaks 主要检测已经不可达、但仍未释放的内存。�
 `MallocScribble` 会用 `0x55` 填充已经释放的内存，便于在调试时识别释放后的内容。这与自动释放池清理槽位时使用 `0xA3` 的目的相似，但属于不同的调试机制。
 
 ---
-
-## 八、需要结合版本理解的结论
-
-- **“`extra_rc` 占 19 位。”** 这只适用于无指针认证的 arm64 分支。本文检查的 arm64e、iOS 模拟器和 x86_64 分支使用 8 位。
-- **“isa 里有一个 `deallocating` 位。”** 本文检查的当前布局中没有这个独立字段。Runtime 使用 `extra_rc == 0 && has_sidetable_rc == 0` 判断对象是否正在析构。
-- **“AutoreleasePoolPage 固定为 4096 字节。”** 4096 是本文所用构建配置的计算结果，源码通过平台宏选择页面大小，并没有把它写成不变的结构常量。
-- **“`NSAutoreleasePool` 和 `@autoreleasepool` 只是语法不同。”** 两者都用于划定自动释放池的生命周期，但入口并不相同。`@autoreleasepool {}` 会被编译为 `objc_autoreleasePoolPush` / `objc_autoreleasePoolPop`；`NSAutoreleasePool` 则通过对象接口使用自动释放池。在引用计数环境中，向 `NSAutoreleasePool` 发送 `drain` 与发送 `release` 的效果相同。
-- **“`autorelease` 一定会把对象加入池。”** 语义上它表示延后放弃所有权，但返回值优化可能避免对象真正进入池页，见第五节。
-- **“过度释放一定会立刻崩溃。”** 对象销毁后，悬空指针仍然保存旧地址；错误可能在对应内存被复用后才表现出来。
-- **“SideTable 是一张单独的全局哈希表。”** 当前实现使用 `StripedMap<SideTable>` 按对象地址分片，各分片独立加锁。具体分片数属于实现细节。
-- **“`retain` 和 `release` 全部由 C/C++ 实现。”** 部分架构的快速路径直接写在汇编中，nil 和 Tagged Pointer 等情况可以提前返回，慢速路径才进入 C++ 实现。
-
----
-
 ## 总结
 
 MRC 的核心是让每一份所有权都能够配平。通过 `alloc`、`new`、`copy`、`mutableCopy` 方法族取得对象时，调用方拥有返回对象；`retain` 会再取得一份所有权；不再需要时，要用 `release` 或 `autorelease` 放弃相应的所有权。判断依据是 API 的命名约定，而不是方法内部是否真的创建了新对象。Core Foundation 的 Create/Get Rule 遵循相同的思路。
