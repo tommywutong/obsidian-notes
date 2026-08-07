@@ -184,38 +184,252 @@ Objective-C 对象与 Core Foundation 对象桥接时，三个关键字分别表
 
 ## 二、MRC 怎样保存一个对象
 
-这部分推荐以下博客辅助理解：[](https://itcharge.cn/blogs/tech/ios/memory-management-01/#_3-5-2-%E5%A4%9A%E4%B8%AA%E5%AF%B9%E8%B1%A1%E5%86%85%E5%AD%98%E7%AE%A1%E7%90%86%E6%80%9D%E6%83%B3)
+前面讨论的是“单个对象”的内存管理：谁创建对象，谁负责在不需要时释放；如果通过 `retain` 获得了对象的所有权，也需要在之后对应一次 `release`。
 
-下面的 `Box` 需要保存传入的字符串。setter 取得新值的所有权，同时放弃旧值的所有权：
+但实际开发中更常见的是“一个对象保存另一个对象”。这部分可以结合 [iOS 开发：彻底理解 iOS 内存管理（MRC 篇）](https://itcharge.cn/blogs/tech/ios/memory-management-01/#_3-5-2-%E5%A4%9A%E4%B8%AA%E5%AF%B9%E8%B1%A1%E5%86%85%E5%AD%98%E7%AE%A1%E7%90%86%E6%80%9D%E6%83%B3) 的 3.5.2～3.5.6 阅读。
+
+例如，`Box` 内部需要保存一个字符串：
 
 ```objc
 @interface Box : NSObject {
-    NSString *_label;
-}
-@end
-
-@implementation Box
-
-- (NSString *)label { return _label; }
-
-- (void)setLabel:(NSString *)label {
-    [label retain];
-    [_label release];
-    _label = label;
+    NSString *_name;
 }
 
-- (void)dealloc {
-    [_label release];
-    [super dealloc];      // ARC 下写这一句是编译错误
-}
+- (void)setName:(NSString *)name;
 @end
 ```
 
-setter 必须先 `retain` 新值，再 `release` 旧值。如果新旧值是同一个对象，而且当前引用计数恰好为 1，先释放旧值可能使对象立即销毁，后续的 `retain` 就会访问已经释放的内存。先 `retain` 新值可以避免这个问题。这也是 Apple 在 [Practical Memory Management](https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/MemoryMgmt/Articles/mmPractical.html) 中给出的顺序。
+这里实际上存在两个对象：
 
-ARC 下不再手写这三行，但相同的赋值语义仍然存在，通常由 `objc_storeStrong` 等 Runtime 接口完成。
+```text
+Box 对象
+   ↓ 持有
+NSString 对象
+```
 
-初始化和销毁期间通常直接访问 ivar，而不调用 setter。此时对象可能尚未完成初始化或已经开始销毁；setter 还可能被子类覆写或触发 KVO，不适合参与这两个阶段。
+这就从“单个对象内存管理”进入了“多个对象之间的内存管理”。
+
+### 1. 为什么不能直接赋值
+
+最简单的 setter 可能会写成：
+
+```objc
+- (void)setName:(NSString *)name {
+    _name = name;
+}
+```
+
+但这样只是让 `_name` 指向 `name`，并没有取得这个 `NSString` 对象的所有权。
+
+```objc
+NSString *str = [[NSString alloc] initWithString:@"Tom"];
+
+[box setName:str];
+
+[str release];
+```
+
+`str` 是外部通过 `alloc` 创建的，所以外部拥有这个对象。如果 `Box` 的 setter 只是简单执行 `_name = name`，那么外部执行 `[str release]` 后，字符串就可能被销毁，而 `_name` 仍然保存原来的地址。此时 `_name` 就成了野指针。
+
+因此，如果 `Box` 想长期保存这个对象，就必须取得一份属于自己的所有权：
+
+```objc
+- (void)setName:(NSString *)name {
+    [name retain];
+    _name = name;
+}
+```
+
+此时可以把持有关系理解为：
+
+```text
+外部 ───────→ NSString
+                ↑
+Box  ───────────┘
+```
+
+外部和 `Box` 各自拥有一份所有权。所以，即使外部执行 `[str release]`，也只是放弃了外部自己的所有权；`Box` 仍然持有字符串，对象不会被销毁。
+
+### 2. 换成新对象时，释放旧对象
+
+但是，上面的 setter 还有一个问题。假设 `Box` 原来保存的是：
+
+```text
+Box → NSString A
+```
+
+现在执行：
+
+```objc
+box.name = stringB;
+```
+
+`Box` 不再需要 `NSString A`，准备改为保存 `NSString B`。这时不能只执行：
+
+```objc
+[name retain];
+_name = name;
+```
+
+因为 `Box` 对旧对象 A 的那次 `retain` 还没有对应的 `release`。指针一旦改为指向 B，`Box` 就失去了释放 A 的机会，A 会发生内存泄漏。
+
+所以 setter 还要负责放弃旧对象：
+
+```objc
+- (void)setName:(NSString *)name {
+    [_name release];    // 不再持有旧对象
+
+    [name retain];      // 持有新对象
+    _name = name;
+}
+```
+
+整个过程是：
+
+```text
+原来：
+Box ──retain──> NSString A
+
+重新赋值：
+box.name = stringB;
+
+第一步：[_name release]
+Box 放弃 NSString A
+
+第二步：[name retain]
+Box 取得 NSString B 的所有权
+
+第三步：_name = name
+Box ──retain──> NSString B
+```
+
+
+### 3. 还要考虑“自己赋值给自己”
+
+上面的写法还存在最后一个问题。
+
+假设第一次执行：
+
+```objc
+box.name = str;
+```
+之后又执行：
+```objc
+box.name = str;
+```
+
+此时 `_name == name`，也就是说“旧对象”和“新对象”其实是同一个对象。如果仍然按照下面的顺序执行，就存在风险：
+
+```objc
+[_name release];
+[name retain];
+```
+
+如果这个字符串当前只剩 `Box` 的这一份所有权，`[_name release]` 就可能让引用计数变成 0，对象随即被销毁。接下来的 `[name retain]` 就是在向已经销毁的对象发送消息，此时 `name` 已经是野指针。
+
+因此，setter 在修改之前，要先判断新旧对象是不是同一个对象：
+
+```objc
+- (void)setName:(NSString *)name {
+    if (_name != name) {
+        [_name release];
+        [name retain];
+        _name = name;
+    }
+}
+```
+
+只有新旧对象不同的时候，才需要执行一次“旧对象 `release`、新对象 `retain`”。
+
+### 4. MRC setter 最终形式
+
+`retain` 在增加引用计数的同时，还会返回对象本身，因此下面两行：
+
+```objc
+[name retain];
+_name = name;
+```
+
+可以合并为：
+
+```objc
+_name = [name retain];
+```
+
+最终的 setter 可以写成：
+
+```objc
+- (void)setName:(NSString *)name {
+    if (_name != name) {
+        [_name release];
+        _name = [name retain];
+    }
+}
+```
+
+它的执行顺序是：
+
+```text
+1. 判断新旧对象是不是同一个对象
+
+2. release 旧对象
+   → 放弃旧对象的所有权
+
+3. retain 新对象
+   → 取得新对象的所有权
+
+4. _name 指向新对象
+```
+
+这里之所以可以先 `release`、再 `retain`，是因为前面的 `_name != name` 已经保证旧对象和新对象不是同一个对象。因此，不会出现“`release` 销毁了新对象，随后又对野指针执行 `retain`”的问题。
+
+### 5. Box 自己销毁时也要 release
+
+setter 中的 `_name = [name retain]` 意味着 `Box` 取得了这个对象的一份所有权。根据 MRC，`retain` 取得的所有权必须用一次对应的 `release` 放弃。
+
+所以 `Box` 自己销毁时，也必须放弃对 `_name` 的所有权：
+
+```objc
+- (void)dealloc {
+    [_name release];
+    [super dealloc];
+}
+```
+
+完整的 MRC 对象持有关系可以总结为：
+
+```text
+Box 开始保存对象
+        ↓
+retain 新对象
+
+Box 更换对象
+        ↓
+release 旧对象
+retain 新对象
+
+Box 自己销毁
+        ↓
+release 当前持有的对象
+```
+
+最终的核心思想只有一句：
+
+> MRC 中，一个对象如果想长期保存另一个对象，就必须取得它的所有权；不再需要这个对象时，就必须放弃对应的所有权。
+
+也就是：
+
+```text
+要持有 → retain
+不持有 → release
+
+retain 一次
+就必须有一次对应的 release
+```
+
+这就是多个对象之间进行 MRC 内存管理的核心。这里不是无条件记忆“先 `release`”或“先 `retain`”，而是因为这一版的最终方案先用 `_name != name` 排除了自赋值，所以后面可以采用“先释放旧对象，再持有新对象”的顺序。
+
+> 补充：ARC 下不再手写这些 `retain` 和 `release`，但“保存新对象、放弃旧对象”的所有权变化仍然存在，通常由编译器和 Runtime 完成。
 
 ### 补充：MRC 代码里为什么也有 `objc_retain`
 
