@@ -154,6 +154,19 @@ ARC 仍然使用这些方法族判断返回值的所有权，只是对应的引�
 
 ### Core Foundation 的所有权规则
 
+> Objective-C 是一门编程语言。
+> 
+>Core Foundation，简称 CF，是苹果提供的一套用 C 语言写的基础框架。
+>
+>关系大概是：
+>iOS / macOS 应用  
+↓  
+Foundation：Objective-C 风格  
+↓  
+Core Foundation：C 语言风格  
+↓  
+更底层的系统能力
+
 Core Foundation 使用类似的命名约定：
 
 - **Create Rule**：函数名中包含 `Create` 或 `Copy` 时，调用方通常拥有返回值，并负责 `CFRelease`；
