@@ -74,12 +74,12 @@ struct weak_entry_t {
 
 各层的伸缩阈值都是写死的常量：
 
-| 层 | 触发条件 | 动作 |
-| --- | --- | --- |
-| `weak_entry_t` 内联→外置 | 4 个内联槽用满，第 5 个到来 | calloc 4 槽，随即扩到 8 |
-| `weak_entry_t` 外置扩容 | `num_refs >= TABLE_SIZE * 3/4` | 翻倍，全量重哈希 |
-| `weak_table_t` 扩容 | `num_entries >= old_size * 3/4` | `old_size ? old_size*2 : 64` |
-| `weak_table_t` 收缩 | `old_size >= 1024 && old_size/16 >= num_entries` | 缩到 `old_size/8` |
+| 层                    | 触发条件                                             | 动作                           |
+| -------------------- | ------------------------------------------------ | ---------------------------- |
+| `weak_entry_t` 内联→外置 | 4 个内联槽用满，第 5 个到来                                 | calloc 4 槽，随即扩到 8            |
+| `weak_entry_t` 外置扩容  | `num_refs >= TABLE_SIZE * 3/4`                   | 翻倍，全量重哈希                     |
+| `weak_table_t` 扩容    | `num_entries >= old_size * 3/4`                  | `old_size ? old_size*2 : 64` |
+| `weak_table_t` 收缩    | `old_size >= 1024 && old_size/16 >= num_entries` | 缩到 `old_size/8`              |
 
 收缩条件苛刻得很显眼：表至少 1024 项、且实际占用不到十六分之一才缩，缩完也只到八分之一。这是明确的取舍——宁可浪费内存也不频繁 rehash，只有大表才值得回收。
 
