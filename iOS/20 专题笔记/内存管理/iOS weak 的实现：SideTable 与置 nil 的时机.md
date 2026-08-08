@@ -15,21 +15,13 @@ draft: true
 ---
 # weak 的实现：SideTable、weak_table_t 与置 nil 的时机
 
-`__weak` 的语义只有一句话：不持有对象，对象销毁后自动变成 `nil`。
-
-前半句靠编译器——它不插 retain 就行了。后半句是个真问题：对象自己都要没了，凭什么还能回头把散落在各处的指针一个个改掉？它得先知道有哪些指针指着自己。
-
-所以 weak 的实现本质上是一张反向索引表。
-
-表的结构值得拆开讲，但这篇真正想解决的是另一个问题：那些指针到底在哪一刻变成 `nil`。流传很广的说法是"要等 `dealloc` 跑完，中间有段野指针窗口"——这个说法可以用一次实验推翻，而且推翻之后你会发现，Apple 在源码注释里已经解释过为什么要这么设计。
-
-上一篇 [[iOS 内存：ARC 的两半#几个说法需要纠正|ARC 的两半]] 里说"ARC 不追踪引用关系"，唯一的例外就是这里。
-
----
 
 ## 一、四层结构，每层的 key 都不一样
 
-中文资料在这一节最容易出错，因为四层套下来很容易把某一层的 key 说成另一层的。主干是这样：
+`SideTable` 中存储了对象的引用计数以及所关联的弱引用指针，它是 `SideTables()` 这样一个全局哈希表的 `value`，其数据结构如下图所示：
+
+![image.png](https://cdn.jsdelivr.net/gh/Biscoffee/piccbes@master/img/20260808171652362.png)
+
 
 ```text
 SideTables()                     全局入口
@@ -48,9 +40,10 @@ SideTables()                     全局入口
                                 key : __weak 变量自己的地址
 ```
 
-`weak_table_t` 的 key 是被弱引用的对象，不是 weak 指针。这是最常被说反的一条。查表的方向写在函数签名里：`weak_entry_for_referent(weak_table_t *, objc_object *referent)`——传进去的是对象，拿回来的是那一堆 weak 变量地址。因为对象销毁时需要的正是这个方向。
+`weak_table_t` 的 key 是被弱引用的对象，不是 weak 指针。
 
-`__weak` 变量的地址是第二层（`weak_entry_t` 内部）的 key，跟第一层不是一回事。
+
+
 
 结构体定义（`objc-weak.h`）：
 
